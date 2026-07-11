@@ -34,6 +34,12 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
 
+# flutter_scene_box3d normally resolves box3d from pub.dev. This local
+# override supplies the native source tree required by its Android build hook.
+dependency_overrides:
+  box3d:
+    path: ../../../../box3d_project/box3d.dart
+
 flutter:
   uses-material-design: true
 
