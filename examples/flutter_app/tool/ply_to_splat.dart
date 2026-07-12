@@ -4,7 +4,8 @@
 // carry. Used by fetch_splat_asset.sh to keep the example's captured asset
 // small enough to bundle.
 //
-// Run with `dart run tool/ply_to_splat.dart <in.ply> <out.splat>`.
+// Run with `dart --packages=../../.dart_tool/package_config.json
+// tool/ply_to_splat.dart <in.ply> <out.splat>` from examples/flutter_app.
 
 // The splat codec is engine-internal, but this dev tool may import it.
 // ignore_for_file: implementation_imports
