@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:camera/camera.dart';
@@ -10,6 +11,7 @@ import 'package:video_player_platform_interface/video_player_platform_interface.
 import 'example_action_hint.dart';
 import 'example_overlay.dart';
 import 'example_settings.dart';
+import 'external_texture_stats.dart';
 
 /// Which live source feeds the scene.
 enum _SourceKind {
@@ -56,6 +58,8 @@ class _ExampleExternalTextureState extends State<ExampleExternalTexture> {
   final Scene scene = Scene();
 
   ExternalTexture? _source;
+  final ExternalTextureStats _stats = ExternalTextureStats();
+  Timer? _statsRefreshTimer;
   VideoPlayerController? _video;
   CameraController? _camera;
   _SourceKind _kind = _SourceKind.video;
@@ -188,7 +192,7 @@ class _ExampleExternalTextureState extends State<ExampleExternalTexture> {
     if (cameras.isEmpty) throw StateError('No cameras available.');
     final controller = CameraController(
       cameras.first,
-      ResolutionPreset.medium,
+      ResolutionPreset.ultraHigh,
       enableAudio: false,
     );
     _camera = controller;
@@ -206,13 +210,32 @@ class _ExampleExternalTextureState extends State<ExampleExternalTexture> {
       height: height,
     );
     _source = source;
+    _stats.reset();
+    source.addListener(_onSourceChanged);
     _bind(source);
   }
 
+  void _onSourceChanged() {
+    final source = _source;
+    if (source == null || source.lastCaptureDuration == Duration.zero) return;
+    _stats.record(source.lastCaptureDuration);
+    if (mounted && _statsRefreshTimer == null) {
+      _statsRefreshTimer = Timer(const Duration(milliseconds: 250), () {
+        _statsRefreshTimer = null;
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
   Future<void> _teardown() async {
+    _statsRefreshTimer?.cancel();
+    _statsRefreshTimer = null;
     _bind(null);
-    _source?.dispose();
+    final source = _source;
+    source?.removeListener(_onSourceChanged);
+    source?.dispose();
     _source = null;
+    _stats.reset();
     final video = _video;
     _video = null;
     await video?.dispose();
@@ -257,7 +280,6 @@ class _ExampleExternalTextureState extends State<ExampleExternalTexture> {
   );
 
   Widget _panel() {
-    final source = _source;
     return Card(
       color: Colors.black54,
       child: Padding(
@@ -336,11 +358,14 @@ class _ExampleExternalTextureState extends State<ExampleExternalTexture> {
               Padding(
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(
-                  source == null
+                  _source == null
                       ? 'Starting...'
-                      : '${source.width}x${source.height}, '
-                            '${source.captureCount} captures, '
-                            'last ${source.lastCaptureDuration.inMilliseconds} ms',
+                      : '${_source!.width}x${_source!.height}, '
+                            '${_stats.captureCount} captures, '
+                            'last ${_stats.lastCaptureDuration.inMilliseconds} ms, '
+                            'min ${_stats.minCaptureDuration.inMilliseconds} ms, '
+                            'max ${_stats.maxCaptureDuration.inMilliseconds} ms, '
+                            'avg ${_stats.averageCaptureMilliseconds.toStringAsFixed(1)} ms',
                   style: const TextStyle(color: Colors.white70, fontSize: 11),
                 ),
               ),
