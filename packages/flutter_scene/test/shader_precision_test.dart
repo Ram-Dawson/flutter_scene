@@ -11,7 +11,8 @@ import 'dart:io';
 import 'package:flutter_scene/src/fmat/fmat.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-String _shader(String name) => File('shaders/$name').readAsStringSync();
+String _shader(String name) =>
+    File('shaders/$name').readAsStringSync().replaceAll('\r\n', '\n');
 
 void main() {
   test('lit and unlit fragment sources open with the mediump default', () {

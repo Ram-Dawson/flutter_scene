@@ -8,6 +8,9 @@ import 'package:flutter_scene/scene.dart' show BloomSettings;
 import 'package:flutter_scene/src/render/bloom_pass.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+String _shader(String name) =>
+    File('shaders/$name').readAsStringSync().replaceAll('\r\n', '\n');
+
 void main() {
   test('views sharing a reference size spread bloom alike', () {
     // A header, and a taller overlay the same character moves into.
@@ -75,9 +78,7 @@ void main() {
     'firefly suppression is on by default and only weights the threshold',
     () {
       expect(BloomSettings().fireflySuppression, isTrue);
-      final source = File(
-        'shaders/flutter_scene_bloom_threshold.frag',
-      ).readAsStringSync();
+      final source = _shader('flutter_scene_bloom_threshold.frag');
       // The plain box stage of a two-stage prefilter averages unweighted.
       expect(
         source,
@@ -94,9 +95,7 @@ void main() {
 
   test('highlights compress softly toward 1000 before they bloom', () {
     expect(BloomSettings().highlight, 1000.0);
-    final source = File(
-      'shaders/flutter_scene_bloom_threshold.frag',
-    ).readAsStringSync();
+    final source = _shader('flutter_scene_bloom_threshold.frag');
     // Compression runs before the threshold, and only in the thresholded stage.
     final early = source.indexOf('if (threshold_info.apply_threshold < 0.5)');
     final compress = source.indexOf(
@@ -109,9 +108,7 @@ void main() {
   });
 
   test('the threshold shader loop bound matches the Dart cap', () {
-    final source = File(
-      'shaders/flutter_scene_bloom_threshold.frag',
-    ).readAsStringSync();
+    final source = _shader('flutter_scene_bloom_threshold.frag');
     expect(source, contains('const int kMaxTaps = $kMaxBloomThresholdTaps;'));
   });
 }

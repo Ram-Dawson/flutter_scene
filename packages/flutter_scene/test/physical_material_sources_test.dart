@@ -16,6 +16,9 @@ FmatCompilation _compile(String name) {
   return compileFmat(File(path).readAsStringSync(), fileName: path);
 }
 
+String _shader(String name) =>
+    File('shaders/$name').readAsStringSync().replaceAll('\r\n', '\n');
+
 bool _hasNamedResource(Object? value, String name) {
   if (value is Map) {
     if (value['name'] == name) return true;
@@ -85,12 +88,8 @@ void main() {
     final manifest =
         jsonDecode(File('shaders/base.shaderbundle.json').readAsStringSync())
             as Map<String, dynamic>;
-    final sampling = File(
-      'shaders/material_shadow_sampling.glsl',
-    ).readAsStringSync();
-    final uniforms = File(
-      'shaders/material_engine_lighting.glsl',
-    ).readAsStringSync();
+    final sampling = _shader('material_shadow_sampling.glsl');
+    final uniforms = _shader('material_engine_lighting.glsl');
 
     expect(
       manifest['StandardFragment']['file'],
@@ -357,11 +356,9 @@ void main() {
   });
 
   test('a bound lightmap displaces the SH diffuse ambient', () {
-    final lightmap = File('shaders/lightmap.glsl').readAsStringSync();
-    final uniforms = File(
-      'shaders/material_engine_lighting.glsl',
-    ).readAsStringSync();
-    final lighting = File('shaders/material_lighting.glsl').readAsStringSync();
+    final lightmap = _shader('lightmap.glsl');
+    final uniforms = _shader('material_engine_lighting.glsl');
+    final lighting = _shader('material_lighting.glsl');
 
     // The sampler takes the texture unit irradiance_field gives up, so a
     // lightmap entry costs no more than its plain twin.
@@ -718,8 +715,8 @@ void main() {
   });
 
   test('shared lighting composes clearcoat after the underlying material', () {
-    final source = File('shaders/material_lighting.glsl').readAsStringSync();
-    final pbr = File('shaders/pbr.glsl').readAsStringSync();
+    final source = _shader('material_lighting.glsl');
+    final pbr = _shader('pbr.glsl');
     final transmission = source.indexOf(
       'out_color += transmitted_light * specular_transmission',
     );
@@ -847,13 +844,9 @@ void main() {
   });
 
   test('vertex bodies carry normals by the inverse-transpose', () {
-    final helper = File('shaders/normal_transform.glsl').readAsStringSync();
-    final unskinned = File(
-      'shaders/flutter_scene_unskinned_body.glsl',
-    ).readAsStringSync();
-    final skinned = File(
-      'shaders/flutter_scene_skinned_body.glsl',
-    ).readAsStringSync();
+    final helper = _shader('normal_transform.glsl');
+    final unskinned = _shader('flutter_scene_unskinned_body.glsl');
+    final skinned = _shader('flutter_scene_skinned_body.glsl');
 
     // mat3(model) is the inverse-transpose only for rotation, uniform scale,
     // and reflection, so both bodies have to route the normal through the
