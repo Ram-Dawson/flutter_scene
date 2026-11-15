@@ -70,24 +70,89 @@ class UnlitMaterial extends Material {
     _textureTransformData,
   );
   bool _textureTransformDirty = true;
+  TextureTransform? _packedTransformIdentity;
+  double _packedOffsetX = double.nan;
+  double _packedOffsetY = double.nan;
+  double _packedScaleX = double.nan;
+  double _packedScaleY = double.nan;
+  double _packedRotation = double.nan;
+  int _packedTexCoord = -1;
+
+  /// Whether the cached `TextureTransform` uniform block will be repacked on
+  /// the next bind.
+  @visibleForTesting
+  bool get debugTextureTransformDirty =>
+      _textureTransformDirty || !_isTextureTransformUpToDate();
+
+  /// Number of times this material has packed its `TextureTransform` uniform
+  /// block.
+  @visibleForTesting
+  int debugTextureTransformPackCount = 0;
+
+  /// Ensures the cached `TextureTransform` uniform block is up to date and
+  /// returns its byte view.
+  @visibleForTesting
+  ByteData packTextureTransformForTesting() {
+    _ensureTextureTransformPacked();
+    return _textureTransformByteData;
+  }
 
   static final gpu.SamplerOptions _repeatSampler = gpu.SamplerOptions(
     widthAddressMode: gpu.SamplerAddressMode.repeat,
     heightAddressMode: gpu.SamplerAddressMode.repeat,
   );
 
+  bool _isTextureTransformUpToDate() {
+    final transform = _baseColorTextureTransform;
+    final offset = transform.offset;
+    final scale = transform.scale;
+    return identical(_packedTransformIdentity, transform) &&
+        _packedTexCoord == _baseColorTextureTexCoord &&
+        _packedOffsetX == offset.x &&
+        _packedOffsetY == offset.y &&
+        _packedScaleX == scale.x &&
+        _packedScaleY == scale.y &&
+        _packedRotation == transform.rotation;
+  }
+
   void _ensureTextureTransformPacked() {
-    if (!_textureTransformDirty) return;
+    final transform = _baseColorTextureTransform;
+    final texCoord = _baseColorTextureTexCoord;
+    final offset = transform.offset;
+    final scale = transform.scale;
+    final offsetX = offset.x;
+    final offsetY = offset.y;
+    final scaleX = scale.x;
+    final scaleY = scale.y;
+    final rotation = transform.rotation;
+    if (!_textureTransformDirty &&
+        identical(_packedTransformIdentity, transform) &&
+        _packedTexCoord == texCoord &&
+        _packedOffsetX == offsetX &&
+        _packedOffsetY == offsetY &&
+        _packedScaleX == scaleX &&
+        _packedScaleY == scaleY &&
+        _packedRotation == rotation) {
+      return;
+    }
     _textureTransformData
-      ..[0] = _baseColorTextureTransform.offset.x
-      ..[1] = _baseColorTextureTransform.offset.y
-      ..[2] = _baseColorTextureTransform.scale.x
-      ..[3] = _baseColorTextureTransform.scale.y
-      ..[4] = math.cos(_baseColorTextureTransform.rotation)
-      ..[5] = math.sin(_baseColorTextureTransform.rotation)
-      ..[6] = _baseColorTextureTexCoord.clamp(0, 1).toDouble()
+      ..[0] = offsetX
+      ..[1] = offsetY
+      ..[2] = scaleX
+      ..[3] = scaleY
+      ..[4] = math.cos(rotation)
+      ..[5] = math.sin(rotation)
+      ..[6] = texCoord.clamp(0, 1).toDouble()
       ..[7] = 0.0;
+    _packedTransformIdentity = transform;
+    _packedOffsetX = offsetX;
+    _packedOffsetY = offsetY;
+    _packedScaleX = scaleX;
+    _packedScaleY = scaleY;
+    _packedRotation = rotation;
+    _packedTexCoord = texCoord;
     _textureTransformDirty = false;
+    debugTextureTransformPackCount++;
   }
 
   /// How the material's alpha is interpreted. [AlphaMode.opaque] ignores
