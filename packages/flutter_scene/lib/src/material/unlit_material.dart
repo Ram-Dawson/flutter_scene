@@ -47,12 +47,48 @@ class UnlitMaterial extends Material {
   TextureSource? baseColorTexture;
 
   /// UV transform applied to [baseColorTexture].
-  TextureTransform baseColorTextureTransform = TextureTransform();
+  TextureTransform get baseColorTextureTransform => _baseColorTextureTransform;
+  TextureTransform _baseColorTextureTransform = TextureTransform();
+  set baseColorTextureTransform(TextureTransform value) {
+    _baseColorTextureTransform = value;
+    _textureTransformDirty = true;
+  }
 
   /// Texture-coordinate channel used by [baseColorTexture].
-  int baseColorTextureTexCoord = 0;
+  int get baseColorTextureTexCoord => _baseColorTextureTexCoord;
+  int _baseColorTextureTexCoord = 0;
+  set baseColorTextureTexCoord(int value) {
+    _baseColorTextureTexCoord = value;
+    _textureTransformDirty = true;
+  }
 
-  static final Float32List _textureTransformScratch = Float32List(8);
+  static final Float32List _fragInfoScratch = Float32List(7);
+  static final ByteData _fragInfoBytes = ByteData.sublistView(_fragInfoScratch);
+
+  final Float32List _textureTransformData = Float32List(8);
+  late final ByteData _textureTransformByteData = ByteData.sublistView(
+    _textureTransformData,
+  );
+  bool _textureTransformDirty = true;
+
+  static final gpu.SamplerOptions _repeatSampler = gpu.SamplerOptions(
+    widthAddressMode: gpu.SamplerAddressMode.repeat,
+    heightAddressMode: gpu.SamplerAddressMode.repeat,
+  );
+
+  void _ensureTextureTransformPacked() {
+    if (!_textureTransformDirty) return;
+    _textureTransformData
+      ..[0] = _baseColorTextureTransform.offset.x
+      ..[1] = _baseColorTextureTransform.offset.y
+      ..[2] = _baseColorTextureTransform.scale.x
+      ..[3] = _baseColorTextureTransform.scale.y
+      ..[4] = math.cos(_baseColorTextureTransform.rotation)
+      ..[5] = math.sin(_baseColorTextureTransform.rotation)
+      ..[6] = _baseColorTextureTexCoord.clamp(0, 1).toDouble()
+      ..[7] = 0.0;
+    _textureTransformDirty = false;
+  }
 
   /// How the material's alpha is interpreted. [AlphaMode.opaque] ignores
   /// alpha; [AlphaMode.blend] routes the material through the depth-sorted
@@ -100,28 +136,22 @@ class UnlitMaterial extends Material {
   ) {
     super.bind(pass, transientsBuffer, lighting);
 
-    var fragInfo = Float32List.fromList([
-      baseColorFactor.r, baseColorFactor.g,
-      baseColorFactor.b, baseColorFactor.a, // color
-      vertexColorWeight, // vertex_color_weight
-      lodFade, // fade
-      displayReferred ? 1.0 : 0.0, // display_referred
-    ]);
+    _fragInfoScratch
+      ..[0] = baseColorFactor.r
+      ..[1] = baseColorFactor.g
+      ..[2] = baseColorFactor.b
+      ..[3] = baseColorFactor.a
+      ..[4] = vertexColorWeight
+      ..[5] = lodFade
+      ..[6] = displayReferred ? 1.0 : 0.0;
     pass.bindUniform(
       fragmentShader.cachedUniformSlot("FragInfo"),
-      transientsBuffer.emplace(ByteData.sublistView(fragInfo)),
+      transientsBuffer.emplaceDeduplicated(_fragInfoBytes),
     );
-    final transform = _textureTransformScratch
-      ..[0] = baseColorTextureTransform.offset.x
-      ..[1] = baseColorTextureTransform.offset.y
-      ..[2] = baseColorTextureTransform.scale.x
-      ..[3] = baseColorTextureTransform.scale.y
-      ..[4] = math.cos(baseColorTextureTransform.rotation)
-      ..[5] = math.sin(baseColorTextureTransform.rotation)
-      ..[6] = baseColorTextureTexCoord.clamp(0, 1).toDouble();
+    _ensureTextureTransformPacked();
     pass.bindUniform(
       fragmentShader.cachedUniformSlot('TextureTransform'),
-      transientsBuffer.emplace(ByteData.sublistView(transform)),
+      transientsBuffer.emplaceDeduplicated(_textureTransformByteData),
     );
     final resolved = resolveTextureSource(baseColorTexture);
     pass.bindTexture(
@@ -129,11 +159,7 @@ class UnlitMaterial extends Material {
       Material.whitePlaceholder(resolved),
       sampler: samplerOrPlaceholder(
         resolved,
-        textureSourceSampler(baseColorTexture) ??
-            gpu.SamplerOptions(
-              widthAddressMode: gpu.SamplerAddressMode.repeat,
-              heightAddressMode: gpu.SamplerAddressMode.repeat,
-            ),
+        textureSourceSampler(baseColorTexture) ?? _repeatSampler,
       ),
     );
     // The unlit shader carries the FogInfo block (fog.glsl) too.
