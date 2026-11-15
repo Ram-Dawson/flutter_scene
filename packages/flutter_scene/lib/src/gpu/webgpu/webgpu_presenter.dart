@@ -1,10 +1,13 @@
-/// Getting a WebGPU frame into Flutter as a `ui.Image`, synchronously.
+/// Getting a WebGPU frame into Flutter as a `ui.Image`, synchronously, or
+/// presenting it directly into an opted-in on-screen DOM `<canvas>`.
 ///
-/// The same handoff the WebGL2 backend uses (`snapshotTextureSync` in
+/// The `ui.Image` path mirrors the WebGL2 backend (`snapshotTextureSync` in
 /// `web/gpu_context.dart`), because `Scene.render` draws the frame inside a
 /// synchronous paint callback. The canvas's current texture is rendered,
 /// submitted, and transferred out with `transferToImageBitmap`, which takes the
 /// submitted contents and gives the canvas a fresh texture for the next frame.
+/// When an opted-in DOM `<canvas>` is mounted, [blitToDomCanvasSync] renders
+/// the same fullscreen blit directly into that swapchain texture instead.
 library;
 
 import 'dart:js_interop';
@@ -16,7 +19,9 @@ import 'package:web/web.dart' as web;
 import 'webgpu_device.dart';
 import 'webgpu_interop.dart';
 
-/// Owns the `OffscreenCanvas` frames are handed to Flutter through.
+/// Owns the `OffscreenCanvas` frames are handed to Flutter through, and an
+/// optional direct presentation path targeting an opted-in on-screen DOM
+/// `<canvas>`.
 final class WebGpuPresenter {
   WebGpuPresenter(this.device) : _canvas = web.OffscreenCanvas(1, 1) {
     final context = _canvas.getContext('webgpu');
@@ -26,13 +31,91 @@ final class WebGpuPresenter {
     _context = context as GPUCanvasContext;
   }
 
+  /// DOM element id for the opt-in on-screen `<canvas>` used by direct WebGPU
+  /// presentation.
+  static const String kDirectPresentCanvasId = 'flutter-scene-webgpu-canvas';
+
   final WebGpuDevice device;
   final web.OffscreenCanvas _canvas;
   late final GPUCanvasContext _context;
   bool _configured = false;
 
+  web.HTMLCanvasElement? _domCanvas;
+  GPUCanvasContext? _domContext;
+  bool _domConfigured = false;
+  int _domWidth = 0;
+  int _domHeight = 0;
+  ui.Rect? _lastLogicalArea;
+
   /// The canvas texture format frames are rendered in.
   String get format => device.preferredCanvasFormat;
+
+  /// Whether an active on-screen DOM `<canvas>` is mounted and opted in for
+  /// direct WebGPU presentation.
+  bool get canPresentToDomCanvas => _resolveDomCanvas() != null;
+
+  void _resetDomCanvas() {
+    if (_domConfigured || _domContext != null) {
+      try {
+        _domContext?.unconfigure();
+      } catch (_) {}
+    }
+    _domCanvas = null;
+    _domContext = null;
+    _domConfigured = false;
+    _domWidth = 0;
+    _domHeight = 0;
+    _lastLogicalArea = null;
+  }
+
+  web.HTMLCanvasElement? _resolveDomCanvas() {
+    final element = web.document.getElementById(kDirectPresentCanvasId);
+    if (element == null || !element.isA<web.HTMLCanvasElement>()) {
+      _resetDomCanvas();
+      return null;
+    }
+    final canvas = element as web.HTMLCanvasElement;
+    // Read `data-direct-present` via `getAttribute` (`String?`) rather than
+    // `dataset['directPresent']`, whose `package:web` indexer is typed as
+    // non-nullable `String` and traps on `undefined` under dart2wasm when the
+    // attribute is absent.
+    if (canvas.getAttribute('data-direct-present') != '1') {
+      _resetDomCanvas();
+      return null;
+    }
+    final previous = _domCanvas;
+    if (previous == null ||
+        _domContext == null ||
+        !canvas.strictEquals(previous).toDart) {
+      if (_domConfigured || _domContext != null) {
+        try {
+          _domContext?.unconfigure();
+        } catch (_) {}
+      }
+      JSObject? rawContext;
+      try {
+        rawContext = canvas.getContext('webgpu');
+      } catch (_) {
+        rawContext = null;
+      }
+      if (rawContext == null) {
+        _domCanvas = null;
+        _domContext = null;
+        _domConfigured = false;
+        _domWidth = 0;
+        _domHeight = 0;
+        _lastLogicalArea = null;
+        return null;
+      }
+      _domCanvas = canvas;
+      _domContext = rawContext as GPUCanvasContext;
+      _domConfigured = false;
+      _domWidth = 0;
+      _domHeight = 0;
+      _lastLogicalArea = null;
+    }
+    return canvas;
+  }
 
   void _resize(int width, int height) {
     if (_configured && _canvas.width == width && _canvas.height == height) {
@@ -139,22 +222,13 @@ fn fs(@builtin(position) position: vec4f) -> @location(0) vec4f {
         }),
       );
 
-  /// Copies [source], a single-level 2D view of a [width] by [height] color
-  /// texture, to a frame and returns it as a `ui.Image` without awaiting
-  /// anything.
-  ///
-  /// The bytes cross unchanged, rows top-down: an sRGB [source] is drawn
-  /// through an sRGB view of the canvas so the decode on load is undone on
-  /// store, and the canvas format's channel order is the canvas's concern.
-  ui.Image blitToImageSync(
-    GPUTextureView source,
-    int width,
-    int height, {
+  void _submitBlit(
+    GPUCanvasContext context,
+    GPUTextureView source, {
     required bool srgb,
   }) {
-    _resize(width, height);
     final targetFormat = srgb ? '$format-srgb' : format;
-    final target = _context.getCurrentTexture().createView(
+    final target = context.getCurrentTexture().createView(
       _o({'format': targetFormat}),
     );
     final group = device.device.createBindGroup(
@@ -183,7 +257,85 @@ fn fs(@builtin(position) position: vec4f) -> @location(0) vec4f {
       ..draw(3)
       ..end();
     device.device.queue.submit([encoder.finish()].toJS);
+  }
+
+  /// Copies [source], a single-level 2D view of a [width] by [height] color
+  /// texture, to a frame and returns it as a `ui.Image` without awaiting
+  /// anything.
+  ///
+  /// The bytes cross unchanged, rows top-down: an sRGB [source] is drawn
+  /// through an sRGB view of the canvas so the decode on load is undone on
+  /// store, and the canvas format's channel order is the canvas's concern.
+  ui.Image blitToImageSync(
+    GPUTextureView source,
+    int width,
+    int height, {
+    required bool srgb,
+  }) {
+    _resize(width, height);
+    _submitBlit(_context, source, srgb: srgb);
     return _transferSync();
+  }
+
+  /// Blits [source], a single-level 2D view of a [width] by [height] color
+  /// texture, directly into the opted-in on-screen DOM `<canvas>` without
+  /// transferring an `ImageBitmap` or wrapping a `ui.Image`.
+  ///
+  /// Returns `false` when no opted-in DOM `<canvas>` is available, dimensions
+  /// or [logicalArea] are empty, or swapchain presentation fails transiently
+  /// (such as during tab backgrounding or context transitions), allowing the
+  /// caller to fall back to [blitToImageSync].
+  bool blitToDomCanvasSync(
+    GPUTextureView source,
+    int width,
+    int height, {
+    required ui.Rect logicalArea,
+    required bool srgb,
+  }) {
+    final domCanvas = _resolveDomCanvas();
+    final domContext = _domContext;
+    if (domCanvas == null ||
+        domContext == null ||
+        width < 1 ||
+        height < 1 ||
+        !logicalArea.isFinite ||
+        logicalArea.isEmpty) {
+      return false;
+    }
+    try {
+      if (!_domConfigured ||
+          _domWidth != width ||
+          _domHeight != height ||
+          domCanvas.width != width ||
+          domCanvas.height != height) {
+        domCanvas.width = width;
+        domCanvas.height = height;
+        domContext.configure(
+          GPUCanvasConfiguration(
+            device: device.device,
+            format: format,
+            alphaMode: 'premultiplied',
+            viewFormats: ['$format-srgb'.toJS].toJS,
+          ),
+        );
+        _domConfigured = true;
+        _domWidth = width;
+        _domHeight = height;
+      }
+      if (_lastLogicalArea != logicalArea) {
+        final style = domCanvas.style;
+        style.left = '${logicalArea.left}px';
+        style.top = '${logicalArea.top}px';
+        style.width = '${logicalArea.width}px';
+        style.height = '${logicalArea.height}px';
+        _lastLogicalArea = logicalArea;
+      }
+      _submitBlit(domContext, source, srgb: srgb);
+      return true;
+    } catch (_) {
+      _domConfigured = false;
+      return false;
+    }
   }
 
   ui.Image _transferSync() {
@@ -201,5 +353,6 @@ fn fs(@builtin(position) position: vec4f) -> @location(0) vec4f {
 
   void dispose() {
     if (_configured) _context.unconfigure();
+    _resetDomCanvas();
   }
 }

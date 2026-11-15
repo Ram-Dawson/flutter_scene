@@ -251,7 +251,19 @@ abstract base class Surface {
 abstract base class GpuHost {
   const GpuHost();
 
+  /// DOM element id for the opt-in on-screen WebGPU `<canvas>`.
+  static const String kDirectPresentCanvasId = 'flutter-scene-webgpu-canvas';
+
   GpuCapabilities get capabilities;
+
+  /// Whether an opted-in on-screen DOM `<canvas>` is ready for direct
+  /// presentation without a `ui.Image` handoff.
+  bool get canPresentToDomCanvas;
+
+  /// Presents [texture] directly into the opted-in on-screen DOM `<canvas>`
+  /// positioned at [logicalArea] in CSS pixels, returning `false` when
+  /// unavailable so callers can fall back to [textureToImage].
+  bool presentToDomCanvas(Texture texture, {required ui.Rect logicalArea});
 
   /// Hands [texture] to Flutter as a `ui.Image`.
   ui.Image textureToImage(Texture texture);
