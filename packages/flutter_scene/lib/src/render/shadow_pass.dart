@@ -115,6 +115,7 @@ class ShadowPass extends RenderGraphPass {
     PointShadowFrame? pointShadows,
     ByteData? shadowUniform,
     ShadowCachePlan? cachePlan,
+    this.spotCachePlan,
     SharedShadowAtlas? shared,
   }) : assert(shared == null || cascades.isEmpty),
        _renderScene = renderScene,
@@ -151,6 +152,10 @@ class ShadowPass extends RenderGraphPass {
   final SpotShadowFrame? _spotShadows;
   final PointShadowFrame? _pointShadows;
   final ShadowCachePlan? _cachePlan;
+
+  /// Optional cross-frame cache plan for spot shadow tiles.
+  final SpotShadowCachePlan? spotCachePlan;
+
   final SharedShadowAtlas? _shared;
 
   Vector3 get _casterCameraPosition =>
@@ -204,6 +209,10 @@ class ShadowPass extends RenderGraphPass {
     final plan = _cachePlan;
     if (plan != null) {
       _renderStaticTiles(context, plan);
+    }
+    final spotPlan = spotCachePlan;
+    if (spotPlan != null && _spotShadows != null) {
+      _renderSpotCacheTiles(context, spotPlan);
     }
 
     final spotCount = _spotShadows?.matrices.length ?? 0;
@@ -327,12 +336,48 @@ class ShadowPass extends RenderGraphPass {
     final spots = _spotShadows;
     if (spots != null) {
       for (var s = 0; s < spots.matrices.length; s++) {
-        renderTile(
-          _cascades.length + s,
-          spots.matrices[s],
-          spots.casterFaces,
-          casterChannelMask: spots.casterChannelMasks[s],
-        );
+        final atlasTile = _cascades.length + s;
+        final tilePlan = spotPlan != null && s < spotPlan.tiles.length
+            ? spotPlan.tiles[s]
+            : null;
+        if (tilePlan != null && tilePlan.cached) {
+          switch (tilePlan.copySource) {
+            case SpotTileCopySource.none:
+              // Cleared atlas tile (depth 1.0) already represents no casters.
+              break;
+            case SpotTileCopySource.staticTile:
+              final source = tilePlan.entry?.staticTile;
+              if (source != null) {
+                _encodeTileCopy(renderPass, atlasTile, source);
+              } else {
+                renderTile(
+                  atlasTile,
+                  spots.matrices[s],
+                  tilePlan.casterFaces,
+                  casterChannelMask: spots.casterChannelMasks[s],
+                );
+              }
+            case SpotTileCopySource.completeTile:
+              final source = tilePlan.entry?.completeTile;
+              if (source != null) {
+                _encodeTileCopy(renderPass, atlasTile, source);
+              } else {
+                renderTile(
+                  atlasTile,
+                  spots.matrices[s],
+                  tilePlan.casterFaces,
+                  casterChannelMask: spots.casterChannelMasks[s],
+                );
+              }
+          }
+        } else {
+          renderTile(
+            atlasTile,
+            spots.matrices[s],
+            spots.casterFacesFor(s),
+            casterChannelMask: spots.casterChannelMasks[s],
+          );
+        }
       }
     }
     final pointFrame = _pointShadows;
@@ -374,8 +419,16 @@ class ShadowPass extends RenderGraphPass {
     final spotFrame = _spotShadows;
     SpotShadowInfo? spotInfo;
     if (spotFrame != null) {
+      final matrices = spotPlan == null
+          ? spotFrame.matrices
+          : [
+              for (var s = 0; s < spotFrame.matrices.length; s++)
+                s < spotPlan.tiles.length && spotPlan.tiles[s].cached
+                    ? spotPlan.tiles[s].matrix
+                    : spotFrame.matrices[s],
+            ];
       spotInfo = SpotShadowInfo(
-        matrices: spotFrame.matrices,
+        matrices: matrices,
         firstTile: _cascades.length,
         totalTiles: totalTiles,
         tileResolution: _tileResolution,
@@ -448,6 +501,140 @@ class ShadowPass extends RenderGraphPass {
       // A sliced warm-up skipped some of its casters, so render it again on
       // the next frame rather than reuse it.
       if (deferredPipelineBuilds > deferred) entry.hasContent = false;
+    }
+  }
+
+  /// Renders persistent spot shadow cache tiles (`staticTile` and/or
+  /// `completeTile`) scheduled by [spotPlan] before the frame atlas pass opens.
+  void _renderSpotCacheTiles(
+    RenderGraphContext context,
+    SpotShadowCachePlan spotPlan,
+  ) {
+    for (final tilePlan in spotPlan.tiles) {
+      if (!tilePlan.cached) continue;
+      final entry = tilePlan.entry!;
+
+      final needStatic =
+          tilePlan.hasStaticCasters &&
+          (tilePlan.renderStaticTile || entry.staticTile == null);
+      if (needStatic) {
+        final commandBuffer = gpu.gpuContext.createCommandBuffer();
+        entry.staticTile ??= gpu.gpuContext.createTexture(
+          gpu.StorageMode.devicePrivate,
+          _tileResolution,
+          _tileResolution,
+          format: gpu.PixelFormat.r32Float,
+          enableRenderTargetUsage: true,
+          enableShaderReadUsage: true,
+        );
+        final depth = spotPlan.cache.tileDepth ??= gpu.gpuContext.createTexture(
+          gpu.StorageMode.deviceTransient,
+          _tileResolution,
+          _tileResolution,
+          format: gpu.gpuContext.defaultDepthStencilFormat,
+          enableRenderTargetUsage: true,
+          enableShaderReadUsage: false,
+        );
+        final target = gpu.RenderTarget.singleColor(
+          gpu.ColorAttachment(
+            texture: entry.staticTile!,
+            clearValue: Vector4(1.0, 1.0, 1.0, 1.0),
+          ),
+          depthStencilAttachment: gpu.DepthStencilAttachment(
+            texture: depth,
+            depthClearValue: 1.0,
+          ),
+        );
+        final renderPass = commandBuffer.createRenderPass(target);
+        final encoder = ShadowEncoder(
+          renderPass,
+          context.transientsBuffer,
+          tilePlan.matrix,
+          _casterCameraPosition,
+          tilePlan.casterFaces,
+          filter: ShadowCasterFilter.staticOnly,
+          casterChannelMask: tilePlan.casterChannelMask,
+        );
+        final deferred = deferredPipelineBuilds;
+        _renderScene.cull(encoder.frustum, encoder.submitCulled);
+        encoder.flush();
+        rendererSubmissions.submit(commandBuffer);
+        tilePlan.renderStaticTile = false;
+        if (deferredPipelineBuilds > deferred) {
+          entry.hasStaticContent = false;
+        }
+      }
+
+      final needComplete =
+          tilePlan.copySource == SpotTileCopySource.completeTile &&
+          (tilePlan.renderCompleteTile ||
+              needStatic ||
+              entry.completeTile == null);
+      if (needComplete) {
+        final commandBuffer = gpu.gpuContext.createCommandBuffer();
+        entry.completeTile ??= gpu.gpuContext.createTexture(
+          gpu.StorageMode.devicePrivate,
+          _tileResolution,
+          _tileResolution,
+          format: gpu.PixelFormat.r32Float,
+          enableRenderTargetUsage: true,
+          enableShaderReadUsage: true,
+        );
+        final depth = spotPlan.cache.tileDepth ??= gpu.gpuContext.createTexture(
+          gpu.StorageMode.deviceTransient,
+          _tileResolution,
+          _tileResolution,
+          format: gpu.gpuContext.defaultDepthStencilFormat,
+          enableRenderTargetUsage: true,
+          enableShaderReadUsage: false,
+        );
+        final target = gpu.RenderTarget.singleColor(
+          gpu.ColorAttachment(
+            texture: entry.completeTile!,
+            clearValue: Vector4(1.0, 1.0, 1.0, 1.0),
+          ),
+          depthStencilAttachment: gpu.DepthStencilAttachment(
+            texture: depth,
+            depthClearValue: 1.0,
+          ),
+        );
+        final renderPass = commandBuffer.createRenderPass(target);
+        if (tilePlan.hasStaticCasters && entry.staticTile != null) {
+          _encodeTileCopy(renderPass, 0, entry.staticTile!);
+        }
+        renderPass.setViewport(
+          gpu.Viewport(
+            x: 0,
+            y: 0,
+            width: _tileResolution,
+            height: _tileResolution,
+          ),
+        );
+        final encoder = ShadowEncoder(
+          renderPass,
+          context.transientsBuffer,
+          tilePlan.matrix,
+          _casterCameraPosition,
+          tilePlan.casterFaces,
+          filter: ShadowCasterFilter.dynamicOnly,
+          casterChannelMask: tilePlan.casterChannelMask,
+        );
+        final deferred = deferredPipelineBuilds;
+        if (tilePlan.hasStaticCasters) {
+          for (final item in _renderScene.items) {
+            encoder.submit(item);
+          }
+        } else {
+          _renderScene.cull(encoder.frustum, encoder.submitCulled);
+        }
+        encoder.flush();
+        rendererSubmissions.submit(commandBuffer);
+        tilePlan.renderCompleteTile = false;
+        if (deferredPipelineBuilds > deferred ||
+            (tilePlan.hasStaticCasters && !entry.hasStaticContent)) {
+          entry.hasCompleteContent = false;
+        }
+      }
     }
   }
 

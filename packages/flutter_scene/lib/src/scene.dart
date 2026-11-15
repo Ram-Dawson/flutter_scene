@@ -658,7 +658,7 @@ base class Scene implements SceneGraph {
     }
     var requested = 0;
     for (final spot in spots) {
-      if (spot.light.castsShadow) requested++;
+      if (spotLightCastsShadow(spot.light)) requested++;
     }
     for (final point in points) {
       if (point.light.castsShadow) requested++;
@@ -840,7 +840,10 @@ base class Scene implements SceneGraph {
     _irradianceField.dispose();
     _punctualLightBuffer.releaseTextures();
     _autoExposureState = null;
+    _directionalShadowCache?.dispose();
     _directionalShadowCache = null;
+    _spotShadowCache?.dispose();
+    _spotShadowCache = null;
     _ssgiHistoryColor = null;
     _ssgiHistoryViewProjection = null;
     _probeCapturePool?.clear();
@@ -863,7 +866,9 @@ base class Scene implements SceneGraph {
     if (_taaState != null) 'taa',
     if (_irradianceField.layout != null) 'irradiance',
     if (_autoExposureState != null) 'autoExposure',
-    if (_directionalShadowCache != null) 'shadowCache',
+    if (_directionalShadowCache != null || _spotShadowCache != null)
+      'shadowCache',
+    if (_spotShadowCache != null) 'spotShadowCache',
     if (_ssgiHistoryColor != null) 'ssgi',
     if (_punctualLightBuffer.debugHoldsTextures) 'punctualLights',
     if (_probeCapturePool != null) 'probe',
@@ -1879,6 +1884,10 @@ base class Scene implements SceneGraph {
   // are (or the light stops casting). See DirectionalShadowCache.
   DirectionalShadowCache? _directionalShadowCache;
 
+  // Cross-frame cache for spot shadow tiles (static caster tiles and
+  // stationary complete tiles). See SpotShadowCache.
+  SpotShadowCache? _spotShadowCache;
+
   @override
   void add(Node child) {
     root.add(child);
@@ -2412,7 +2421,8 @@ base class Scene implements SceneGraph {
     // atlas to stop being one uniform strip, at which point
     // PointLight.shadowMapResolution and SpotLight.shadowMapResolution can
     // mean what they say for every light rather than only the first caster.
-    final shadowTileResolution = lightComponent?.light.castsShadow == true
+    final shadowTileResolution =
+        directionalLightCastsShadow(lightComponent?.light)
         ? lightComponent!.light.shadowMapResolution
         : spotShadowFrame?.tileResolution ??
               (pointShadowFrame == null
@@ -2442,7 +2452,7 @@ base class Scene implements SceneGraph {
     _sharedShadowAtlas =
         !debugDisableSharedShadowTiles &&
             anchor != null &&
-            lightComponent?.light.castsShadow != true &&
+            !directionalLightCastsShadow(lightComponent?.light) &&
             (spotShadowFrame != null || pointShadowFrame != null)
         ? SharedShadowAtlas(anchor.camera.position)
         : null;
@@ -3353,8 +3363,8 @@ base class Scene implements SceneGraph {
         projection.scaleX > 0.0 &&
         projection.scaleY > 0.0 &&
         projection.far > projection.near;
-    final cascades = light != null && light.castsShadow && projectionValid
-        ? light.computeCascades(
+    final cascades = directionalLightCastsShadow(light) && projectionValid
+        ? light!.computeCascades(
             camera,
             pixelSize.width / pixelSize.height,
             lightDirection,
@@ -3476,7 +3486,11 @@ base class Scene implements SceneGraph {
             staticSignature: staticShadowSignature,
           );
       effectiveCascades = shadowCachePlan.cascades;
-    } else {
+    } else if (!hasStaticShadowCasters ||
+        light == null ||
+        !light.castsShadow ||
+        !light.cacheStaticShadows) {
+      _directionalShadowCache?.dispose();
       _directionalShadowCache = null;
     }
 
@@ -3540,6 +3554,36 @@ base class Scene implements SceneGraph {
     // use one resolution, the directional light's when it casts, otherwise the
     // spots', otherwise twice a point caster's face resolution (faces pack
     // four to a tile at half the tile edge).
+    final sharedShadowForView =
+        cascades.isEmpty &&
+            (view.target != null || identical(view, _sharedShadowAnchor))
+        ? _sharedShadowAtlas
+        : null;
+    SpotShadowCachePlan? spotShadowCachePlan;
+    if (spotShadowFrame != null &&
+        spotShadowFrame.casters.any((c) => c.light.cacheStaticShadows)) {
+      final effectiveSpotTileResolution = cascades.isNotEmpty
+          ? light!.shadowMapResolution
+          : spotShadowFrame.tileResolution;
+      if (sharedShadowForView?.atlas == null) {
+        spotShadowCachePlan = (_spotShadowCache ??= SpotShadowCache()).plan(
+          spotShadows: spotShadowFrame,
+          items: renderScene.items,
+          hasStaticShadowCasters: hasStaticShadowCasters,
+          staticSignature: staticShadowSignature,
+          tileResolution: effectiveSpotTileResolution,
+        );
+      }
+    } else if (_spotShadowCache != null &&
+        !renderScene.spotLights.any(
+          (s) =>
+              s.node.internalEffectiveVisible &&
+              s.light.castsShadow &&
+              s.light.cacheStaticShadows,
+        )) {
+      _spotShadowCache!.dispose();
+      _spotShadowCache = null;
+    }
     if (cascades.isNotEmpty ||
         spotShadowFrame != null ||
         pointShadowFrame != null) {
@@ -3563,11 +3607,8 @@ base class Scene implements SceneGraph {
           spotShadows: spotShadowFrame,
           pointShadows: pointShadowFrame,
           cachePlan: shadowCachePlan,
-          shared:
-              cascades.isEmpty &&
-                  (view.target != null || identical(view, _sharedShadowAnchor))
-              ? _sharedShadowAtlas
-              : null,
+          spotCachePlan: spotShadowCachePlan,
+          shared: sharedShadowForView,
           // PostShadowInfo describes the directional cascades, so publish it
           // only when they exist (a spot-only atlas has no directional light).
           shadowUniform:
