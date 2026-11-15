@@ -7,6 +7,9 @@ part of '_gpu.dart';
 class GpuHost {
   const GpuHost._();
 
+  /// DOM element id for the opt-in on-screen WebGPU `<canvas>`.
+  static const String kDirectPresentCanvasId = 'flutter-scene-webgpu-canvas';
+
   /// See [GpuCapabilities].
   GpuCapabilities get capabilities => const GpuCapabilities(
     textureToImage: true,
@@ -17,6 +20,14 @@ class GpuHost {
     // it yet. Tracked upstream as flutter/flutter#188474.
     compute: false,
   );
+
+  /// Always `false` on native; Impeller shares textures directly via
+  /// [textureToImage] without a copy.
+  bool get canPresentToDomCanvas => false;
+
+  /// Always `false` on native; callers use [textureToImage].
+  bool presentToDomCanvas(Texture texture, {required ui.Rect logicalArea}) =>
+      false;
 
   /// Hands [texture] to Flutter as a `ui.Image`, without a copy.
   ui.Image textureToImage(Texture texture) => texture.asImage();

@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart'
-    show PipelineOwner, RenderCustomPaint, SemanticsBuilderCallback;
+    show PipelineOwner, RenderBox, RenderCustomPaint, SemanticsBuilderCallback;
 import 'package:clock/clock.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/semantics.dart' show SemanticsBinding;
@@ -505,6 +505,8 @@ class _SceneViewState extends State<SceneView>
       _scene.repaintRequested.addListener(_onRepaintRequested);
       _sceneSemantics = SceneSemanticsCoordinator(_scene);
       _autoPointer = null;
+      _paintedDirectDomSize = null;
+      _paintedDirectDomPixelRatio = null;
     }
     // A new set of resources to wait for, a newly gated view, or a different
     // scene: hold the scene again until its loads and warm-up complete.
@@ -522,6 +524,7 @@ class _SceneViewState extends State<SceneView>
     }
     // Repaint immediately so a changed camera / scene is reflected even when
     // not auto-ticking.
+    _directRenderedThisFrame = false;
     _repaint.notify();
   }
 
@@ -625,8 +628,75 @@ class _SceneViewState extends State<SceneView>
     _lastTickTime = now;
     _elapsed.value = revealElapsed;
     widget.onTick?.call(revealElapsed, deltaSeconds);
+    if (widget.viewsBuilder == null &&
+        !_viewSize.isEmpty &&
+        _paintedDirectDomSize == _viewSize &&
+        _paintedDirectDomPixelRatio == _effectivePixelRatio &&
+        _scene.renderScene.widgetComponents.isEmpty &&
+        _scene.canRenderDirectToDomCanvas) {
+      final ro = _sceneSemantics.renderObject;
+      final globalOffset = ro is RenderBox && ro.attached && ro.hasSize
+          ? ro.localToGlobal(Offset.zero)
+          : Offset.zero;
+      final viewport = Offset.zero & _viewSize;
+      final camera = _cameraForFrame();
+      var directOk = false;
+      try {
+        directOk = _scene.renderDirectToDomCanvas(
+          camera,
+          viewport: viewport,
+          pixelRatio: _effectivePixelRatio,
+          globalOffset: globalOffset,
+        );
+      } finally {
+        _sceneSemantics.refreshAfterRender(camera, viewport);
+      }
+      if (directOk) {
+        _markDirectRenderedThisFrame();
+        return;
+      }
+      _paintedDirectDomSize = null;
+      _paintedDirectDomPixelRatio = null;
+    }
     _repaint.notify();
   }
+
+  double _effectivePixelRatio = 1.0;
+  Size? _paintedDirectDomSize;
+  double? _paintedDirectDomPixelRatio;
+  bool _directRenderedThisFrame = false;
+  bool _directFrameResetScheduled = false;
+
+  void _markDirectRenderedThisFrame() {
+    _directRenderedThisFrame = true;
+    if (!_directFrameResetScheduled) {
+      _directFrameResetScheduled = true;
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        _directFrameResetScheduled = false;
+        _directRenderedThisFrame = false;
+      });
+    }
+  }
+
+  void _recordDirectDomPaintState({
+    required bool directPresented,
+    required Size size,
+    required double pixelRatio,
+  }) {
+    if (directPresented) {
+      _paintedDirectDomSize = size;
+      _paintedDirectDomPixelRatio = pixelRatio;
+    } else {
+      _paintedDirectDomSize = null;
+      _paintedDirectDomPixelRatio = null;
+    }
+  }
+
+  bool _shouldSkipDuplicateDirectPaint(Size size, double pixelRatio) =>
+      _directRenderedThisFrame &&
+      _paintedDirectDomSize == size &&
+      _paintedDirectDomPixelRatio == pixelRatio &&
+      _scene.canRenderDirectToDomCanvas;
 
   Camera? _lastBuiltCamera;
 
@@ -785,8 +855,16 @@ class _SceneViewState extends State<SceneView>
 
   Widget _buildView(BuildContext context) {
     if (!_revealed) {
+      _paintedDirectDomSize = null;
+      _paintedDirectDomPixelRatio = null;
       return _buildLoading(context);
     }
+    // Resolve against the hosting view, not the implicit view (Scene.render's
+    // fallback), which does not exist in multi-window apps whose windows are
+    // all created through the windowing API.
+    final effectivePixelRatio =
+        widget.pixelRatio ?? View.of(context).devicePixelRatio;
+    _effectivePixelRatio = effectivePixelRatio;
     return Listener(
       // Translucent: forwarded events still reach the app's own
       // gesture handlers; the scene never wins a gesture arena.
@@ -811,13 +889,10 @@ class _SceneViewState extends State<SceneView>
               viewsForFrame: widget.viewsBuilder == null
                   ? null
                   : _viewsForFrame,
-              // Resolve against the hosting view, not the implicit
-              // view (Scene.render's fallback), which does not exist
-              // in multi-window apps whose windows are all created
-              // through the windowing API.
-              pixelRatio:
-                  widget.pixelRatio ?? View.of(context).devicePixelRatio,
+              pixelRatio: effectivePixelRatio,
               semantics: _sceneSemantics,
+              onDirectDomPaintState: _recordDirectDomPaintState,
+              shouldSkipDuplicateDirectPaint: _shouldSkipDuplicateDirectPaint,
               repaint: _repaint,
             ),
             // Invisible hosts for the scene's WidgetComponents: each hosted
@@ -952,14 +1027,24 @@ class _ScenePainter extends CustomPainter {
     required this.viewsForFrame,
     required this.pixelRatio,
     required this.semantics,
+    required this.onDirectDomPaintState,
+    required this.shouldSkipDuplicateDirectPaint,
     required Listenable repaint,
   }) : super(repaint: repaint);
 
   final Scene scene;
   final Camera Function()? cameraForFrame;
   final List<RenderView> Function()? viewsForFrame;
-  final double? pixelRatio;
+  final double pixelRatio;
   final SceneSemanticsCoordinator semantics;
+  final void Function({
+    required bool directPresented,
+    required Size size,
+    required double pixelRatio,
+  })
+  onDirectDomPaintState;
+  final bool Function(Size size, double pixelRatio)
+  shouldSkipDuplicateDirectPaint;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -967,6 +1052,11 @@ class _ScenePainter extends CustomPainter {
     // even on frames the engine skips or fails.
     final views = viewsForFrame;
     if (views != null) {
+      onDirectDomPaintState(
+        directPresented: false,
+        size: size,
+        pixelRatio: pixelRatio,
+      );
       final list = views();
       try {
         scene.renderViews(
@@ -990,16 +1080,44 @@ class _ScenePainter extends CustomPainter {
         semantics.refreshAfterRender(primary, area);
       }
     } else {
+      if (shouldSkipDuplicateDirectPaint(size, pixelRatio)) {
+        return;
+      }
       final camera = cameraForFrame!();
+      final viewport = Offset.zero & size;
       try {
-        scene.render(
-          camera,
-          canvas,
-          viewport: Offset.zero & size,
-          pixelRatio: pixelRatio,
-        );
+        if (scene.canRenderDirectToDomCanvas) {
+          final ro = semantics.renderObject;
+          final globalOffset = ro is RenderBox && ro.attached && ro.hasSize
+              ? ro.localToGlobal(Offset.zero)
+              : Offset.zero;
+          final presentedDom = scene.renderDirectToDomCanvas(
+            camera,
+            viewport: viewport,
+            pixelRatio: pixelRatio,
+            globalOffset: globalOffset,
+            fallbackCanvas: canvas,
+          );
+          onDirectDomPaintState(
+            directPresented: presentedDom,
+            size: size,
+            pixelRatio: pixelRatio,
+          );
+        } else {
+          onDirectDomPaintState(
+            directPresented: false,
+            size: size,
+            pixelRatio: pixelRatio,
+          );
+          scene.render(
+            camera,
+            canvas,
+            viewport: viewport,
+            pixelRatio: pixelRatio,
+          );
+        }
       } finally {
-        semantics.refreshAfterRender(camera, Offset.zero & size);
+        semantics.refreshAfterRender(camera, viewport);
       }
     }
   }

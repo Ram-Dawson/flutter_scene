@@ -7,6 +7,9 @@ part of '_gpu.dart';
 class GpuHost {
   const GpuHost._();
 
+  /// DOM element id for the opt-in on-screen WebGPU `<canvas>`.
+  static const String kDirectPresentCanvasId = 'flutter-scene-webgpu-canvas';
+
   /// See [GpuCapabilities].
   GpuCapabilities get capabilities => const GpuCapabilities(
     textureToImage: false,
@@ -14,6 +17,11 @@ class GpuHost {
     presentAsImage: false,
     compute: false,
   );
+
+  bool get canPresentToDomCanvas => false;
+
+  bool presentToDomCanvas(Texture texture, {required ui.Rect logicalArea}) =>
+      false;
 
   ui.Image textureToImage(Texture texture) => _stub();
 

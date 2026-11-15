@@ -2,9 +2,11 @@ part of 'webgpu_backend.dart';
 
 /// The WebGPU backend's integration with the Flutter host.
 ///
-/// Like WebGL2, rendered output reaches Flutter through an `OffscreenCanvas`,
-/// and nothing crosses back, since the framework rasterizes on its own
-/// context and browsers share no textures across contexts.
+/// Like WebGL2, rendered output reaches Flutter through an `OffscreenCanvas`
+/// by default, with an opt-in direct DOM `<canvas>` presentation path on
+/// WebGPU. Nothing crosses back from Flutter to WebGPU, since the framework
+/// rasterizes on its own context and browsers share no textures across
+/// contexts.
 final class _WebGpuHost extends GpuHost {
   const _WebGpuHost(this._backend);
 
@@ -19,6 +21,16 @@ final class _WebGpuHost extends GpuHost {
     // a compute API.
     compute: false,
   );
+
+  @override
+  bool get canPresentToDomCanvas => _backend.canPresentToDomCanvas;
+
+  @override
+  bool presentToDomCanvas(Texture texture, {required ui.Rect logicalArea}) =>
+      _presentTextureToDomCanvasSync(
+        texture as _WebGpuTexture,
+        logicalArea: logicalArea,
+      );
 
   @override
   ui.Image textureToImage(Texture texture) => texture.asImage();
@@ -45,9 +57,7 @@ final class _WebGpuHost extends GpuHost {
       (buffer as _WebGpuDeviceBuffer)._release();
 }
 
-/// Hands [texture] to Flutter as a `ui.Image`, synchronously, through the
-/// context's presenter canvas.
-ui.Image _textureToImageSync(_WebGpuTexture texture) {
+void _validatePresentableTexture(_WebGpuTexture texture) {
   if (!texture.enableShaderReadUsage) {
     throw Exception('Only shader-readable textures can be used as UI images');
   }
@@ -59,10 +69,33 @@ ui.Image _textureToImageSync(_WebGpuTexture texture) {
   if (texture._format.depthOrStencil) {
     throw UnsupportedError('A depth or stencil texture cannot be an image.');
   }
+}
+
+/// Hands [texture] to Flutter as a `ui.Image`, synchronously, through the
+/// context's presenter canvas.
+ui.Image _textureToImageSync(_WebGpuTexture texture) {
+  _validatePresentableTexture(texture);
   return texture._context.presenter.blitToImageSync(
     texture.attachmentView(0, 0),
     texture.width,
     texture.height,
+    srgb: texture._format.name.endsWith('-srgb'),
+  );
+}
+
+/// Presents [texture] directly into the opted-in on-screen DOM `<canvas>`,
+/// returning `false` when unavailable so callers can fall back to
+/// [_textureToImageSync].
+bool _presentTextureToDomCanvasSync(
+  _WebGpuTexture texture, {
+  required ui.Rect logicalArea,
+}) {
+  _validatePresentableTexture(texture);
+  return texture._context.presenter.blitToDomCanvasSync(
+    texture.attachmentView(0, 0),
+    texture.width,
+    texture.height,
+    logicalArea: logicalArea,
     srgb: texture._format.name.endsWith('-srgb'),
   );
 }

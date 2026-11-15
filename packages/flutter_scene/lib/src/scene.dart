@@ -844,6 +844,8 @@ base class Scene implements SceneGraph {
     _directionalShadowCache = null;
     _spotShadowCache?.dispose();
     _spotShadowCache = null;
+    _hasDomPresentedFrame = false;
+    _lastDomLogicalArea = null;
     _ssgiHistoryColor = null;
     _ssgiHistoryViewProjection = null;
     _probeCapturePool?.clear();
@@ -1888,6 +1890,13 @@ base class Scene implements SceneGraph {
   // stationary complete tiles). See SpotShadowCache.
   SpotShadowCache? _spotShadowCache;
 
+  // State of the last frame presented directly to an opted-in host DOM
+  // `<canvas>` so GPU pacing can hold without re-blitting or falling back.
+  bool _hasDomPresentedFrame = false;
+  ui.Rect? _lastDomLogicalArea;
+  int _lastDomPixelWidth = 0;
+  int _lastDomPixelHeight = 0;
+
   @override
   void add(Node child) {
     root.add(child);
@@ -2053,6 +2062,52 @@ base class Scene implements SceneGraph {
       canvas,
       region: viewport,
       pixelRatio: pixelRatio,
+    );
+  }
+
+  /// Whether this scene can render a single screen view directly into an
+  /// opted-in host DOM `<canvas>` without creating a Flutter `ui.Image`.
+  @internal
+  bool get canRenderDirectToDomCanvas =>
+      gpu.gpuHost.canPresentToDomCanvas &&
+      _pendingGraphCapture == null &&
+      views.every((view) => view.target != null);
+
+  /// Renders [camera]'s single screen view directly into the opted-in host
+  /// DOM `<canvas>`, falling back to [fallbackCanvas] when provided if direct
+  /// presentation is unavailable.
+  ///
+  /// Returns `true` when the frame was presented (or held by GPU pacing) on the
+  /// DOM `<canvas>`, leaving [fallbackCanvas] untouched.
+  @internal
+  bool renderDirectToDomCanvas(
+    Camera camera, {
+    required ui.Rect viewport,
+    double? pixelRatio,
+    ui.Offset globalOffset = ui.Offset.zero,
+    ui.Canvas? fallbackCanvas,
+  }) {
+    if (viewport.isEmpty) {
+      return false;
+    }
+    if (!canRenderDirectToDomCanvas) {
+      if (fallbackCanvas != null) {
+        render(
+          camera,
+          fallbackCanvas,
+          viewport: viewport,
+          pixelRatio: pixelRatio,
+        );
+      }
+      return false;
+    }
+    return _renderViewsInternal(
+      [RenderView(camera: camera)],
+      fallbackCanvas,
+      region: viewport,
+      pixelRatio: pixelRatio,
+      allowDirectDomCanvas: true,
+      domGlobalOffset: globalOffset,
     );
   }
 
@@ -2228,16 +2283,27 @@ base class Scene implements SceneGraph {
     double? pixelRatio,
   }) {
     _checkNotDisposed('renderViews');
+    _renderViewsInternal(views, canvas, region: region, pixelRatio: pixelRatio);
+  }
+
+  bool _renderViewsInternal(
+    List<RenderView> views,
+    ui.Canvas? canvas, {
+    ui.Rect? region,
+    double? pixelRatio,
+    bool allowDirectDomCanvas = false,
+    ui.Offset domGlobalOffset = ui.Offset.zero,
+  }) {
     renderScene.recordRenderedViews(views);
     if (!isReadyToRender) {
       debugPrint('Flutter Scene is not ready to render. Skipping frame.');
       debugPrint(
         'You may wait on the Future returned by Scene.initializeStaticResources() before rendering.',
       );
-      return;
+      return false;
     }
 
-    final drawArea = region ?? canvas.getLocalClipBounds();
+    final drawArea = region ?? canvas?.getLocalClipBounds() ?? ui.Rect.zero;
     if (drawArea.isEmpty || views.isEmpty) {
       assert(() {
         _reportBlankFrame(
@@ -2247,7 +2313,21 @@ base class Scene implements SceneGraph {
         );
         return true;
       }());
-      return;
+      return false;
+    }
+
+    final singleScreenView = views.length == 1 && views.first.target == null;
+    final wantDirectDom =
+        allowDirectDomCanvas &&
+        singleScreenView &&
+        _pendingGraphCapture == null &&
+        gpu.gpuHost.canPresentToDomCanvas;
+    if (!wantDirectDom) {
+      _hasDomPresentedFrame = false;
+      _lastDomLogicalArea = null;
+      if (canvas == null) {
+        return false;
+      }
     }
 
     renderStats.beginFrame();
@@ -2339,7 +2419,16 @@ base class Scene implements SceneGraph {
     // When every screen view can re-present, the frame holds before any
     // per-frame upload: on Vulkan each texture upload is a synchronous submit
     // that waits for the GPU backlog, which pacing exists to avoid.
-    final holdFrame = pacingFrame && _canPresentHeldFrame(views, drawArea, dpr);
+    final holdFrame =
+        pacingFrame &&
+        (wantDirectDom
+            ? _canHoldDirectDomFrame(
+                views.first,
+                drawArea,
+                domGlobalOffset,
+                dpr,
+              )
+            : _canPresentHeldFrame(views, drawArea, dpr));
 
     // Advance the scene once per frame (not once per view): tick components
     // and animations and refresh the flat render list before the passes
@@ -2358,10 +2447,16 @@ base class Scene implements SceneGraph {
     if (_awaitingPhysicalResources || _awaitingStageInterfaces) {
       _repaintWhenLoaded(physicalMaterialResourcesLoad);
       _repaintWhenLoaded(stageInterfacesLoad);
-      _presentHeldFrame(views, canvas, drawArea);
+      var presentedDom = false;
+      if (wantDirectDom &&
+          _canHoldDirectDomFrame(views.first, drawArea, domGlobalOffset, dpr)) {
+        presentedDom = true;
+      } else if (canvas != null) {
+        _presentHeldFrame(views, canvas, drawArea);
+      }
       renderStats.endFrame(pipelineCacheSize: pipelineCacheSize);
       rendererSubmissions.endFrame();
-      return;
+      return presentedDom;
     }
 
     if (holdFrame) {
@@ -2369,10 +2464,12 @@ base class Scene implements SceneGraph {
         if (view.target == null) _pacedFrameCount++;
       }
       _holdPace();
-      _presentHeldFrame(views, canvas, drawArea);
+      if (!wantDirectDom) {
+        _presentHeldFrame(views, canvas!, drawArea);
+      }
       renderStats.endFrame(pipelineCacheSize: pipelineCacheSize);
       rendererSubmissions.endFrame();
-      return;
+      return wantDirectDom;
     }
 
     // The frame draws from here on, so the joint matrices the tick computed
@@ -2571,13 +2668,14 @@ base class Scene implements SceneGraph {
         ? screenViews
         : (screenViews..sort((a, b) => a.order.compareTo(b.order)));
 
+    var presentedDom = false;
     for (var i = 0; i < ordered.length; i++) {
       final view = ordered[i];
       final viewArea = _viewDrawArea(drawArea, view.viewport);
       if (viewArea.isEmpty) {
         continue;
       }
-      _renderViewToCanvas(
+      if (_renderViewToCanvas(
         view: view,
         canvas: canvas,
         drawArea: viewArea,
@@ -2590,7 +2688,11 @@ base class Scene implements SceneGraph {
         spotShadowFrame: spotShadowFrame,
         pointShadowFrame: pointShadowFrame,
         capturePlanarReflections: identical(view, planarCaptureView),
-      );
+        wantDirectDom: wantDirectDom,
+        domGlobalOffset: domGlobalOffset,
+      )) {
+        presentedDom = true;
+      }
     }
 
     _sharedShadowAtlas = null;
@@ -2607,6 +2709,7 @@ base class Scene implements SceneGraph {
       _maybeReportCoplanarOverlaps();
       return true;
     }());
+    return presentedDom;
   }
 
   /// Whether a debug build checks the scene for surfaces that overlap in one
@@ -2926,15 +3029,32 @@ base class Scene implements SceneGraph {
     }
   }
 
-  // Renders one [view] into [drawArea] on [canvas], using that view's own
-  // swapchain texture and transient texture pool (so simultaneous views in a
-  // frame do not share render targets). The per-frame work (tick, spatial
-  // rebuild, environment resolve, host-buffer reset) is done once by the
-  // caller; this builds and submits one view's render graph and composites
+  bool _canHoldDirectDomFrame(
+    RenderView view,
+    ui.Rect drawArea,
+    ui.Offset domGlobalOffset,
+    double dpr,
+  ) {
+    if (!_hasDomPresentedFrame) return false;
+    final viewArea = _viewDrawArea(drawArea, view.viewport);
+    if (viewArea.isEmpty) return false;
+    if (_lastDomLogicalArea != viewArea.shift(domGlobalOffset)) return false;
+    final scale =
+        dpr * (view.renderScale ?? _renderScale) * adaptiveRenderScale;
+    return _lastDomPixelWidth == (viewArea.width * scale).ceil() &&
+        _lastDomPixelHeight == (viewArea.height * scale).ceil();
+  }
+
+  // Renders one [view] into [drawArea] on [canvas] (or directly into the
+  // opted-in host DOM `<canvas>` when [wantDirectDom] is true), using that
+  // view's own swapchain texture and transient texture pool (so simultaneous
+  // views in a frame do not share render targets). The per-frame work (tick,
+  // spatial rebuild, environment resolve, host-buffer reset) is done once by
+  // the caller; this builds and submits one view's render graph and composites
   // the result.
-  void _renderViewToCanvas({
+  bool _renderViewToCanvas({
     required RenderView view,
-    required ui.Canvas canvas,
+    required ui.Canvas? canvas,
     required ui.Rect drawArea,
     required double dpr,
     required int viewIndex,
@@ -2945,6 +3065,8 @@ base class Scene implements SceneGraph {
     required SpotShadowFrame? spotShadowFrame,
     required PointShadowFrame? pointShadowFrame,
     bool capturePlanarReflections = false,
+    bool wantDirectDom = false,
+    ui.Offset domGlobalOffset = ui.Offset.zero,
   }) {
     // Allocate the offscreen render target at physical-pixel resolution so
     // the rasterized 3D content matches Flutter's framebuffer density.
@@ -2960,7 +3082,7 @@ base class Scene implements SceneGraph {
       (drawArea.height * scale).ceilToDouble(),
     );
     if (pixelSize.width < 1 || pixelSize.height < 1) {
-      return;
+      return false;
     }
 
     final pendingCapture = _pendingGraphCapture;
@@ -2977,18 +3099,34 @@ base class Scene implements SceneGraph {
         previous.width == pixelSize.width.toInt() &&
         previous.height == pixelSize.height.toInt() &&
         rendererSubmissions.priorFramesInFlight >= maxGpuFramesInFlight) {
-      _pacedFrameCount++;
-      _holdPace();
-      final srcRect = ui.Rect.fromLTWH(0, 0, pixelSize.width, pixelSize.height);
-      final paint = ui.Paint()
-        ..filterQuality = view.filterQuality ?? filterQuality;
-      canvas.drawImageRect(
-        _presentImage(previous, viewIndex),
-        srcRect,
-        drawArea,
-        paint,
-      );
-      return;
+      if (wantDirectDom &&
+          _hasDomPresentedFrame &&
+          _lastDomLogicalArea == drawArea.shift(domGlobalOffset) &&
+          _lastDomPixelWidth == pixelSize.width.toInt() &&
+          _lastDomPixelHeight == pixelSize.height.toInt()) {
+        _pacedFrameCount++;
+        _holdPace();
+        return true;
+      }
+      if (canvas != null) {
+        _pacedFrameCount++;
+        _holdPace();
+        final srcRect = ui.Rect.fromLTWH(
+          0,
+          0,
+          pixelSize.width,
+          pixelSize.height,
+        );
+        final paint = ui.Paint()
+          ..filterQuality = view.filterQuality ?? filterQuality;
+        canvas.drawImageRect(
+          _presentImage(previous, viewIndex),
+          srcRect,
+          drawArea,
+          paint,
+        );
+        return false;
+      }
     }
 
     // Consume a pending render-graph capture aimed at this screen view.
@@ -3026,11 +3164,31 @@ base class Scene implements SceneGraph {
       );
     }
 
+    if (wantDirectDom) {
+      final domArea = drawArea.shift(domGlobalOffset);
+      if (gpu.gpuHost.presentToDomCanvas(
+        swapchainColor,
+        logicalArea: domArea,
+      )) {
+        _hasDomPresentedFrame = true;
+        _lastDomLogicalArea = domArea;
+        _lastDomPixelWidth = pixelSize.width.toInt();
+        _lastDomPixelHeight = pixelSize.height.toInt();
+        return true;
+      }
+      _hasDomPresentedFrame = false;
+      _lastDomLogicalArea = null;
+      if (canvas == null) {
+        return false;
+      }
+    }
+
     final image = _presentImage(swapchainColor, viewIndex);
     final srcRect = ui.Rect.fromLTWH(0, 0, pixelSize.width, pixelSize.height);
     final paint = ui.Paint()
       ..filterQuality = view.filterQuality ?? filterQuality;
-    canvas.drawImageRect(image, srcRect, drawArea, paint);
+    canvas!.drawImageRect(image, srcRect, drawArea, paint);
+    return false;
   }
 
   // How [view]'s passes rasterize depth for a view of [viewportSize] logical

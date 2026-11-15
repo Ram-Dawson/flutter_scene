@@ -124,6 +124,20 @@ final class _WebGpuBackend extends WebBackend {
   @override
   late final GpuHost host = _WebGpuHost(this);
 
+  /// Whether an opted-in on-screen DOM `<canvas>` is ready for direct
+  /// presentation.
+  ///
+  /// Returns `false` safely when queried before [initialize] acquires a device.
+  bool get canPresentToDomCanvas {
+    final activeContext = _context;
+    if (activeContext == null) return false;
+    try {
+      return activeContext.presenter.canPresentToDomCanvas;
+    } catch (_) {
+      return false;
+    }
+  }
+
   @override
   Texture textureFromImage(GpuContext gpuContext, ui.Image image) =>
       throw Exception(

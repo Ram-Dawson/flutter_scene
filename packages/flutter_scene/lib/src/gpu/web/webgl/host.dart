@@ -19,6 +19,15 @@ final class WebGlHost extends GpuHost {
     compute: false,
   );
 
+  /// Direct DOM `<canvas>` presentation is only implemented on WebGPU.
+  @override
+  bool get canPresentToDomCanvas => false;
+
+  /// Always `false` on WebGL2; callers fall back to [textureToImage].
+  @override
+  bool presentToDomCanvas(Texture texture, {required ui.Rect logicalArea}) =>
+      false;
+
   /// Hands [texture] to Flutter as a `ui.Image`.
   @override
   ui.Image textureToImage(Texture texture) => texture.asImage();
