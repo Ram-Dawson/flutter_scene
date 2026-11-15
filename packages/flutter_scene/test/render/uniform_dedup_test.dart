@@ -503,5 +503,163 @@ void main() {
         }
       },
     );
+
+    test(
+      'repacks UBO on in-place TextureTransform field mutations without setter calls (UnlitMaterial & PhysicallyBasedMaterial)',
+      () {
+        final tracker = GpuSubmissionTracker();
+        final arena = createArena(tracker, alignment: 256);
+
+        // 1) UnlitMaterial in-place mutation (e.g. cloud UV scrolling via t.offset.x = ...)
+        final unlit = UnlitMaterial();
+        final unlitInitialBytes = unlit.packTextureTransformForTesting();
+        final unlitView1 = arena.emplaceDeduplicated(unlitInitialBytes);
+        final unlitStaged1 = Uint8List.fromList(
+          arena.debugReadStagedBytes(unlitView1),
+        );
+        expect(unlit.debugTextureTransformPackCount, 1);
+        expect(unlit.debugTextureTransformDirty, isFalse);
+        expect(arena.stagedBytes, 32);
+
+        // Steady bind without changes does not repack or restage.
+        final unlitView1Repeat = arena.emplaceDeduplicated(
+          unlit.packTextureTransformForTesting(),
+        );
+        expect(unlit.debugTextureTransformPackCount, 1);
+        expect(identical(unlitView1Repeat, unlitView1), isTrue);
+        expect(arena.stagedBytes, 32);
+
+        // Mutate offset.x in place without invoking baseColorTextureTransform setter.
+        unlit.baseColorTextureTransform.offset.x += 0.25;
+        expect(unlit.debugTextureTransformDirty, isTrue);
+
+        final unlitRepacked = unlit.packTextureTransformForTesting();
+        final unlitView2 = arena.emplaceDeduplicated(unlitRepacked);
+        final unlitStaged2 = Uint8List.fromList(
+          arena.debugReadStagedBytes(unlitView2),
+        );
+        expect(unlit.debugTextureTransformPackCount, 2);
+        expect(unlit.debugTextureTransformDirty, isFalse);
+        expect(identical(unlitView2, unlitView1), isFalse);
+        expect(unlitStaged2, isNot(equals(unlitStaged1)));
+        expect(unlitRepacked.getFloat32(0, Endian.host), closeTo(0.25, 1e-6));
+        expect(arena.stagedBytes, 64);
+
+        // Subsequent steady binds with irrational double values do not re-pack.
+        unlit.baseColorTextureTransform
+          ..scale.y = -1.0
+          ..rotation = math.pi / 7;
+        expect(unlit.debugTextureTransformDirty, isTrue);
+        final unlitView3 = arena.emplaceDeduplicated(
+          unlit.packTextureTransformForTesting(),
+        );
+        expect(unlit.debugTextureTransformPackCount, 3);
+        expect(arena.stagedBytes, 96);
+        for (var i = 0; i < 10; i++) {
+          final steady = arena.emplaceDeduplicated(
+            unlit.packTextureTransformForTesting(),
+          );
+          expect(identical(steady, unlitView3), isTrue);
+        }
+        expect(unlit.debugTextureTransformPackCount, 3);
+
+        // 2) PhysicallyBasedMaterial in-place mutations across texture slots
+        arena.reset();
+        final pbr = PhysicallyBasedMaterial();
+        final pbrInitial = pbr.packTextureTransformsForTesting();
+        final pbrView1 = arena.emplaceDeduplicated(pbrInitial);
+        final pbrStaged1 = Uint8List.fromList(
+          arena.debugReadStagedBytes(pbrView1),
+        );
+        expect(pbr.debugTextureTransformsPackCount, 1);
+        expect(pbr.debugTextureTransformsDirty, isFalse);
+        expect(pbrInitial.getFloat32(7 * 4, Endian.host), 0.0);
+        expect(arena.stagedBytes, 160);
+
+        // Steady bind before mutation does not repack.
+        expect(
+          identical(
+            arena.emplaceDeduplicated(pbr.packTextureTransformsForTesting()),
+            pbrView1,
+          ),
+          isTrue,
+        );
+        expect(pbr.debugTextureTransformsPackCount, 1);
+
+        // In-place baseColorTextureTransform.offset.x += 0.25 (no setter)
+        pbr.baseColorTextureTransform.offset.x += 0.25;
+        expect(pbr.debugTextureTransformsDirty, isTrue);
+        final pbrAfterBase = pbr.packTextureTransformsForTesting();
+        final pbrView2 = arena.emplaceDeduplicated(pbrAfterBase);
+        final pbrStaged2 = Uint8List.fromList(
+          arena.debugReadStagedBytes(pbrView2),
+        );
+        expect(pbr.debugTextureTransformsPackCount, 2);
+        expect(pbr.debugTextureTransformsDirty, isFalse);
+        expect(identical(pbrView2, pbrView1), isFalse);
+        expect(pbrStaged2, isNot(equals(pbrStaged1)));
+        expect(
+          pbrAfterBase.getFloat32(0 * 4, Endian.host),
+          closeTo(0.25, 1e-6),
+        );
+        // transformedUvs gate flag at float [7] flips to 1.0!
+        expect(pbrAfterBase.getFloat32(7 * 4, Endian.host), 1.0);
+        expect(arena.stagedBytes, 320);
+
+        // Steady bind after baseColor mutation does not repack.
+        expect(
+          identical(
+            arena.emplaceDeduplicated(pbr.packTextureTransformsForTesting()),
+            pbrView2,
+          ),
+          isTrue,
+        );
+        expect(pbr.debugTextureTransformsPackCount, 2);
+
+        // In-place emissiveTextureTransform.rotation (irrational double)
+        pbr.emissiveTextureTransform.rotation = math.pi / 4;
+        expect(pbr.debugTextureTransformsDirty, isTrue);
+        final pbrAfterEmissive = pbr.packTextureTransformsForTesting();
+        final pbrView3 = arena.emplaceDeduplicated(pbrAfterEmissive);
+        final pbrStaged3 = Uint8List.fromList(
+          arena.debugReadStagedBytes(pbrView3),
+        );
+        expect(pbr.debugTextureTransformsPackCount, 3);
+        expect(identical(pbrView3, pbrView2), isFalse);
+        expect(pbrStaged3, isNot(equals(pbrStaged2)));
+        expect(
+          pbrAfterEmissive.getFloat32((24 + 4) * 4, Endian.host),
+          closeTo(math.cos(math.pi / 4), 1e-6),
+        );
+        expect(
+          pbrAfterEmissive.getFloat32((24 + 5) * 4, Endian.host),
+          closeTo(math.sin(math.pi / 4), 1e-6),
+        );
+        expect(arena.stagedBytes, 480);
+
+        // In-place normalTextureTransform.scale.y
+        pbr.normalTextureTransform.scale.y = 2.5;
+        expect(pbr.debugTextureTransformsDirty, isTrue);
+        final pbrAfterNormal = pbr.packTextureTransformsForTesting();
+        final pbrView4 = arena.emplaceDeduplicated(pbrAfterNormal);
+        expect(pbr.debugTextureTransformsPackCount, 4);
+        expect(identical(pbrView4, pbrView3), isFalse);
+        expect(
+          pbrAfterNormal.getFloat32((16 + 3) * 4, Endian.host),
+          closeTo(2.5, 1e-6),
+        );
+        expect(arena.stagedBytes, 640);
+
+        // 10 consecutive steady binds with non-float32-exact doubles must NOT repack.
+        for (var i = 0; i < 10; i++) {
+          final steady = arena.emplaceDeduplicated(
+            pbr.packTextureTransformsForTesting(),
+          );
+          expect(identical(steady, pbrView4), isTrue);
+        }
+        expect(pbr.debugTextureTransformsPackCount, 4);
+        expect(arena.stagedBytes, 640);
+      },
+    );
   });
 }

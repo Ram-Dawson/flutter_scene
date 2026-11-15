@@ -1744,11 +1744,17 @@ class PhysicallyBasedMaterial extends Material {
   late final ByteData _textureTransformsByteData = ByteData.sublistView(
     _textureTransformsData,
   );
+  final List<TextureTransform?> _packedTransformIdentities =
+      List<TextureTransform?>.filled(5, null);
+  final Float64List _packedTransformScalars = Float64List(25)
+    ..fillRange(0, 25, double.nan);
+  final Int32List _packedTransformTexCoords = Int32List(5)..fillRange(0, 5, -1);
 
   /// Whether the cached `TextureTransforms` uniform block will be repacked on
   /// the next bind.
   @visibleForTesting
-  bool get debugTextureTransformsDirty => _textureTransformsDirty;
+  bool get debugTextureTransformsDirty =>
+      _textureTransformsDirty || !_areTextureTransformsUpToDate();
 
   /// Number of times this material has packed its `TextureTransforms` uniform
   /// block.
@@ -1763,55 +1769,116 @@ class PhysicallyBasedMaterial extends Material {
     return _textureTransformsByteData;
   }
 
+  bool _isSlotTransformUpToDate(
+    int slot,
+    TextureTransform transform,
+    int texCoord,
+  ) {
+    if (!identical(_packedTransformIdentities[slot], transform) ||
+        _packedTransformTexCoords[slot] != texCoord) {
+      return false;
+    }
+    final scalarBase = slot * 5;
+    final scalars = _packedTransformScalars;
+    final offset = transform.offset;
+    final scale = transform.scale;
+    return scalars[scalarBase] == offset.x &&
+        scalars[scalarBase + 1] == offset.y &&
+        scalars[scalarBase + 2] == scale.x &&
+        scalars[scalarBase + 3] == scale.y &&
+        scalars[scalarBase + 4] == transform.rotation;
+  }
+
+  bool _areTextureTransformsUpToDate() =>
+      _isSlotTransformUpToDate(
+        0,
+        _baseColorTextureTransform,
+        _baseColorTextureTexCoord,
+      ) &&
+      _isSlotTransformUpToDate(
+        1,
+        _metallicRoughnessTextureTransform,
+        _metallicRoughnessTextureTexCoord,
+      ) &&
+      _isSlotTransformUpToDate(
+        2,
+        _normalTextureTransform,
+        _normalTextureTexCoord,
+      ) &&
+      _isSlotTransformUpToDate(
+        3,
+        _emissiveTextureTransform,
+        _emissiveTextureTexCoord,
+      ) &&
+      _isSlotTransformUpToDate(
+        4,
+        _occlusionTextureTransform,
+        _occlusionTextureTexCoord,
+      );
+
+  void _packAndSnapshotSlot(
+    int slot,
+    TextureTransform transform,
+    int texCoord,
+  ) {
+    _packTextureTransform(
+      _textureTransformsData,
+      slot * 8,
+      transform,
+      texCoord,
+    );
+    _packedTransformIdentities[slot] = transform;
+    _packedTransformTexCoords[slot] = texCoord;
+    final scalarBase = slot * 5;
+    final offset = transform.offset;
+    final scale = transform.scale;
+    _packedTransformScalars
+      ..[scalarBase] = offset.x
+      ..[scalarBase + 1] = offset.y
+      ..[scalarBase + 2] = scale.x
+      ..[scalarBase + 3] = scale.y
+      ..[scalarBase + 4] = transform.rotation;
+  }
+
   void _ensureTextureTransformsPacked() {
-    if (!_textureTransformsDirty) return;
-    final textureTransforms = _textureTransformsData;
-    _packTextureTransform(
-      textureTransforms,
+    if (!_textureTransformsDirty && _areTextureTransformsUpToDate()) return;
+    _packAndSnapshotSlot(
       0,
-      baseColorTextureTransform,
-      baseColorTextureTexCoord,
+      _baseColorTextureTransform,
+      _baseColorTextureTexCoord,
     );
-    _packTextureTransform(
-      textureTransforms,
-      8,
-      metallicRoughnessTextureTransform,
-      metallicRoughnessTextureTexCoord,
+    _packAndSnapshotSlot(
+      1,
+      _metallicRoughnessTextureTransform,
+      _metallicRoughnessTextureTexCoord,
     );
-    _packTextureTransform(
-      textureTransforms,
-      16,
-      normalTextureTransform,
-      normalTextureTexCoord,
+    _packAndSnapshotSlot(2, _normalTextureTransform, _normalTextureTexCoord);
+    _packAndSnapshotSlot(
+      3,
+      _emissiveTextureTransform,
+      _emissiveTextureTexCoord,
     );
-    _packTextureTransform(
-      textureTransforms,
-      24,
-      emissiveTextureTransform,
-      emissiveTextureTexCoord,
-    );
-    _packTextureTransform(
-      textureTransforms,
-      32,
-      occlusionTextureTransform,
-      occlusionTextureTexCoord,
+    _packAndSnapshotSlot(
+      4,
+      _occlusionTextureTransform,
+      _occlusionTextureTexCoord,
     );
     // The base record's padding float carries one flag the shader branches on
     // to skip the five UV-transform evaluations, set when any record
     // transforms its UVs or selects UV set 1. The identity transform
     // reproduces the raw UV bit-exactly, so the flag only gates work.
     final transformedUvs =
-        !baseColorTextureTransform.isIdentity ||
-        !metallicRoughnessTextureTransform.isIdentity ||
-        !normalTextureTransform.isIdentity ||
-        !emissiveTextureTransform.isIdentity ||
-        !occlusionTextureTransform.isIdentity ||
-        baseColorTextureTexCoord != 0 ||
-        metallicRoughnessTextureTexCoord != 0 ||
-        normalTextureTexCoord != 0 ||
-        emissiveTextureTexCoord != 0 ||
-        occlusionTextureTexCoord != 0;
-    textureTransforms[7] = transformedUvs ? 1.0 : 0.0;
+        !_baseColorTextureTransform.isIdentity ||
+        !_metallicRoughnessTextureTransform.isIdentity ||
+        !_normalTextureTransform.isIdentity ||
+        !_emissiveTextureTransform.isIdentity ||
+        !_occlusionTextureTransform.isIdentity ||
+        _baseColorTextureTexCoord != 0 ||
+        _metallicRoughnessTextureTexCoord != 0 ||
+        _normalTextureTexCoord != 0 ||
+        _emissiveTextureTexCoord != 0 ||
+        _occlusionTextureTexCoord != 0;
+    _textureTransformsData[7] = transformedUvs ? 1.0 : 0.0;
     _textureTransformsDirty = false;
     debugTextureTransformsPackCount++;
   }
