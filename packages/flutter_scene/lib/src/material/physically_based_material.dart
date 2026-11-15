@@ -55,7 +55,11 @@ class TextureTransform {
 
   /// Whether this transform leaves UV coordinates unchanged.
   bool get isIdentity =>
-      offset == Vector2.zero() && scale == Vector2.all(1.0) && rotation == 0.0;
+      offset.x == 0.0 &&
+      offset.y == 0.0 &&
+      scale.x == 1.0 &&
+      scale.y == 1.0 &&
+      rotation == 0.0;
 }
 
 /// A metallic-roughness physically based material with optional layered and
@@ -161,7 +165,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _baseColorTextureTransform = TextureTransform();
   set baseColorTextureTransform(TextureTransform value) {
     _baseColorTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [baseColorTexture].
@@ -169,7 +173,7 @@ class PhysicallyBasedMaterial extends Material {
   int _baseColorTextureTexCoord = 0;
   set baseColorTextureTexCoord(int value) {
     _baseColorTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Linear RGBA tint multiplied with [baseColorTexture]. Alpha controls
@@ -205,7 +209,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _metallicRoughnessTextureTransform = TextureTransform();
   set metallicRoughnessTextureTransform(TextureTransform value) {
     _metallicRoughnessTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [metallicRoughnessTexture].
@@ -213,7 +217,7 @@ class PhysicallyBasedMaterial extends Material {
   int _metallicRoughnessTextureTexCoord = 0;
   set metallicRoughnessTextureTexCoord(int value) {
     _metallicRoughnessTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Scalar multiplier applied to the metallic channel. `0` is fully
@@ -251,7 +255,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _normalTextureTransform = TextureTransform();
   set normalTextureTransform(TextureTransform value) {
     _normalTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [normalTexture].
@@ -259,7 +263,7 @@ class PhysicallyBasedMaterial extends Material {
   int _normalTextureTexCoord = 0;
   set normalTextureTexCoord(int value) {
     _normalTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Strength of [normalTexture]'s perturbation. `1` is the unmodified
@@ -305,7 +309,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _emissiveTextureTransform = TextureTransform();
   set emissiveTextureTransform(TextureTransform value) {
     _emissiveTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [emissiveTexture].
@@ -313,7 +317,7 @@ class PhysicallyBasedMaterial extends Material {
   int _emissiveTextureTexCoord = 0;
   set emissiveTextureTexCoord(int value) {
     _emissiveTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Optional ambient-occlusion texture (R channel). Defaults to white
@@ -333,7 +337,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _occlusionTextureTransform = TextureTransform();
   set occlusionTextureTransform(TextureTransform value) {
     _occlusionTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [occlusionTexture].
@@ -341,7 +345,7 @@ class PhysicallyBasedMaterial extends Material {
   int _occlusionTextureTexCoord = 0;
   set occlusionTextureTexCoord(int value) {
     _occlusionTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Strength of [occlusionTexture]'s effect. `0` ignores the map; `1`
@@ -382,7 +386,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _lightmapTextureTransform = TextureTransform();
   set lightmapTextureTransform(TextureTransform value) {
     _lightmapTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [lightmapTexture]. Defaults to `1`,
@@ -391,7 +395,7 @@ class PhysicallyBasedMaterial extends Material {
   int _lightmapTextureTexCoord = 1;
   set lightmapTextureTexCoord(int value) {
     _lightmapTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Multiplier applied to the decoded [lightmapTexture] radiance.
@@ -452,7 +456,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _specularTextureTransform = TextureTransform();
   set specularTextureTransform(TextureTransform value) {
     _specularTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [specularTexture].
@@ -460,7 +464,7 @@ class PhysicallyBasedMaterial extends Material {
   int _specularTextureTexCoord = 0;
   set specularTextureTexCoord(int value) {
     _specularTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Dielectric specular weight.
@@ -486,7 +490,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _specularColorTextureTransform = TextureTransform();
   set specularColorTextureTransform(TextureTransform value) {
     _specularColorTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [specularColorTexture].
@@ -494,7 +498,7 @@ class PhysicallyBasedMaterial extends Material {
   int _specularColorTextureTexCoord = 0;
   set specularColorTextureTexCoord(int value) {
     _specularColorTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Linear dielectric specular color.
@@ -527,7 +531,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _clearcoatTextureTransform = TextureTransform();
   set clearcoatTextureTransform(TextureTransform value) {
     _clearcoatTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [clearcoatTexture].
@@ -535,7 +539,7 @@ class PhysicallyBasedMaterial extends Material {
   int _clearcoatTextureTexCoord = 0;
   set clearcoatTextureTexCoord(int value) {
     _clearcoatTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Clearcoat layer weight.
@@ -561,7 +565,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _clearcoatRoughnessTextureTransform = TextureTransform();
   set clearcoatRoughnessTextureTransform(TextureTransform value) {
     _clearcoatRoughnessTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [clearcoatRoughnessTexture].
@@ -570,7 +574,7 @@ class PhysicallyBasedMaterial extends Material {
   int _clearcoatRoughnessTextureTexCoord = 0;
   set clearcoatRoughnessTextureTexCoord(int value) {
     _clearcoatRoughnessTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Clearcoat perceptual roughness.
@@ -596,7 +600,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _clearcoatNormalTextureTransform = TextureTransform();
   set clearcoatNormalTextureTransform(TextureTransform value) {
     _clearcoatNormalTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [clearcoatNormalTexture].
@@ -604,7 +608,7 @@ class PhysicallyBasedMaterial extends Material {
   int _clearcoatNormalTextureTexCoord = 0;
   set clearcoatNormalTextureTexCoord(int value) {
     _clearcoatNormalTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Clearcoat normal-map strength on each tangent axis.
@@ -630,7 +634,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _sheenColorTextureTransform = TextureTransform();
   set sheenColorTextureTransform(TextureTransform value) {
     _sheenColorTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [sheenColorTexture].
@@ -638,7 +642,7 @@ class PhysicallyBasedMaterial extends Material {
   int _sheenColorTextureTexCoord = 0;
   set sheenColorTextureTexCoord(int value) {
     _sheenColorTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Linear sheen color.
@@ -664,7 +668,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _sheenRoughnessTextureTransform = TextureTransform();
   set sheenRoughnessTextureTransform(TextureTransform value) {
     _sheenRoughnessTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [sheenRoughnessTexture].
@@ -672,7 +676,7 @@ class PhysicallyBasedMaterial extends Material {
   int _sheenRoughnessTextureTexCoord = 0;
   set sheenRoughnessTextureTexCoord(int value) {
     _sheenRoughnessTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Sheen perceptual roughness.
@@ -698,7 +702,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _transmissionTextureTransform = TextureTransform();
   set transmissionTextureTransform(TextureTransform value) {
     _transmissionTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [transmissionTexture].
@@ -706,7 +710,7 @@ class PhysicallyBasedMaterial extends Material {
   int _transmissionTextureTexCoord = 0;
   set transmissionTextureTexCoord(int value) {
     _transmissionTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Specular transmission weight.
@@ -733,7 +737,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _diffuseTransmissionTextureTransform = TextureTransform();
   set diffuseTransmissionTextureTransform(TextureTransform value) {
     _diffuseTransmissionTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [diffuseTransmissionTexture].
@@ -742,7 +746,7 @@ class PhysicallyBasedMaterial extends Material {
   int _diffuseTransmissionTextureTexCoord = 0;
   set diffuseTransmissionTextureTexCoord(int value) {
     _diffuseTransmissionTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Diffuse transmission weight.
@@ -770,7 +774,7 @@ class PhysicallyBasedMaterial extends Material {
       TextureTransform();
   set diffuseTransmissionColorTextureTransform(TextureTransform value) {
     _diffuseTransmissionColorTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [diffuseTransmissionColorTexture].
@@ -779,7 +783,7 @@ class PhysicallyBasedMaterial extends Material {
   int _diffuseTransmissionColorTextureTexCoord = 0;
   set diffuseTransmissionColorTextureTexCoord(int value) {
     _diffuseTransmissionColorTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Linear diffuse transmission color.
@@ -804,7 +808,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _thicknessTextureTransform = TextureTransform();
   set thicknessTextureTransform(TextureTransform value) {
     _thicknessTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [thicknessTexture].
@@ -812,7 +816,7 @@ class PhysicallyBasedMaterial extends Material {
   int _thicknessTextureTexCoord = 0;
   set thicknessTextureTexCoord(int value) {
     _thicknessTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Volume thickness in scene units.
@@ -862,7 +866,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _iridescenceTextureTransform = TextureTransform();
   set iridescenceTextureTransform(TextureTransform value) {
     _iridescenceTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [iridescenceTexture].
@@ -870,7 +874,7 @@ class PhysicallyBasedMaterial extends Material {
   int _iridescenceTextureTexCoord = 0;
   set iridescenceTextureTexCoord(int value) {
     _iridescenceTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Iridescence layer weight.
@@ -905,7 +909,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _iridescenceThicknessTextureTransform = TextureTransform();
   set iridescenceThicknessTextureTransform(TextureTransform value) {
     _iridescenceThicknessTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [iridescenceThicknessTexture].
@@ -914,7 +918,7 @@ class PhysicallyBasedMaterial extends Material {
   int _iridescenceThicknessTextureTexCoord = 0;
   set iridescenceThicknessTextureTexCoord(int value) {
     _iridescenceThicknessTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Minimum iridescent film thickness in nanometres.
@@ -948,7 +952,7 @@ class PhysicallyBasedMaterial extends Material {
   TextureTransform _anisotropyTextureTransform = TextureTransform();
   set anisotropyTextureTransform(TextureTransform value) {
     _anisotropyTextureTransform = value;
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Texture-coordinate channel used by [anisotropyTexture].
@@ -956,7 +960,7 @@ class PhysicallyBasedMaterial extends Material {
   int _anisotropyTextureTexCoord = 0;
   set anisotropyTextureTexCoord(int value) {
     _anisotropyTextureTexCoord = value.clamp(0, 1);
-    _markMaterialDataDirty();
+    _markTextureTransformsDirty();
   }
 
   /// Anisotropic reflection strength.
@@ -988,7 +992,13 @@ class PhysicallyBasedMaterial extends Material {
 
   int _variantKey = 0;
   bool _materialDataDirty = true;
+  bool _textureTransformsDirty = true;
   PhysicalMaterialVariant? _preparedVariant;
+
+  void _markTextureTransformsDirty() {
+    _textureTransformsDirty = true;
+    _markMaterialDataDirty();
+  }
 
   void _markMaterialDataDirty({bool variant = false}) {
     _materialDataDirty = true;
@@ -1385,6 +1395,7 @@ class PhysicallyBasedMaterial extends Material {
     _updateStandardShaderNames();
     _requestPhysicalAssetsIfNeeded();
     _materialDataDirty = true;
+    _textureTransformsDirty = true;
   }
 
   void _applyAdvancedDescriptor(PhysicalMaterialDescriptor d) {
@@ -1666,59 +1677,13 @@ class PhysicallyBasedMaterial extends Material {
     fragInfo[163] = lightListOffset.toDouble();
     pass.bindUniform(
       shader.cachedUniformSlot("FragInfo"),
-      transientsBuffer.emplace(_fragInfoBytes),
+      transientsBuffer.emplaceDeduplicated(_fragInfoBytes),
     );
 
-    final textureTransforms = _textureTransformsScratch;
-    _packTextureTransform(
-      textureTransforms,
-      0,
-      baseColorTextureTransform,
-      baseColorTextureTexCoord,
-    );
-    _packTextureTransform(
-      textureTransforms,
-      8,
-      metallicRoughnessTextureTransform,
-      metallicRoughnessTextureTexCoord,
-    );
-    _packTextureTransform(
-      textureTransforms,
-      16,
-      normalTextureTransform,
-      normalTextureTexCoord,
-    );
-    _packTextureTransform(
-      textureTransforms,
-      24,
-      emissiveTextureTransform,
-      emissiveTextureTexCoord,
-    );
-    _packTextureTransform(
-      textureTransforms,
-      32,
-      occlusionTextureTransform,
-      occlusionTextureTexCoord,
-    );
-    // The base record's padding float carries one flag the shader branches on
-    // to skip the five UV-transform evaluations, set when any record
-    // transforms its UVs or selects UV set 1. The identity transform
-    // reproduces the raw UV bit-exactly, so the flag only gates work.
-    final transformedUvs =
-        !baseColorTextureTransform.isIdentity ||
-        !metallicRoughnessTextureTransform.isIdentity ||
-        !normalTextureTransform.isIdentity ||
-        !emissiveTextureTransform.isIdentity ||
-        !occlusionTextureTransform.isIdentity ||
-        baseColorTextureTexCoord != 0 ||
-        metallicRoughnessTextureTexCoord != 0 ||
-        normalTextureTexCoord != 0 ||
-        emissiveTextureTexCoord != 0 ||
-        occlusionTextureTexCoord != 0;
-    textureTransforms[7] = transformedUvs ? 1.0 : 0.0;
+    _ensureTextureTransformsPacked();
     pass.bindUniform(
       shader.cachedUniformSlot('TextureTransforms'),
-      transientsBuffer.emplace(scratchBytesOf(textureTransforms)),
+      transientsBuffer.emplaceDeduplicated(_textureTransformsByteData),
     );
 
     _bindSlot(pass, shader, 'base_color_texture', baseColorTexture);
@@ -1775,7 +1740,81 @@ class PhysicallyBasedMaterial extends Material {
   );
   static final ByteData _fragInfoBytes = ByteData.sublistView(_fragInfoScratch);
 
-  static final Float32List _textureTransformsScratch = Float32List(40);
+  final Float32List _textureTransformsData = Float32List(40);
+  late final ByteData _textureTransformsByteData = ByteData.sublistView(
+    _textureTransformsData,
+  );
+
+  /// Whether the cached `TextureTransforms` uniform block will be repacked on
+  /// the next bind.
+  @visibleForTesting
+  bool get debugTextureTransformsDirty => _textureTransformsDirty;
+
+  /// Number of times this material has packed its `TextureTransforms` uniform
+  /// block.
+  @visibleForTesting
+  int debugTextureTransformsPackCount = 0;
+
+  /// Ensures the cached `TextureTransforms` uniform block is up to date and
+  /// returns its byte view.
+  @visibleForTesting
+  ByteData packTextureTransformsForTesting() {
+    _ensureTextureTransformsPacked();
+    return _textureTransformsByteData;
+  }
+
+  void _ensureTextureTransformsPacked() {
+    if (!_textureTransformsDirty) return;
+    final textureTransforms = _textureTransformsData;
+    _packTextureTransform(
+      textureTransforms,
+      0,
+      baseColorTextureTransform,
+      baseColorTextureTexCoord,
+    );
+    _packTextureTransform(
+      textureTransforms,
+      8,
+      metallicRoughnessTextureTransform,
+      metallicRoughnessTextureTexCoord,
+    );
+    _packTextureTransform(
+      textureTransforms,
+      16,
+      normalTextureTransform,
+      normalTextureTexCoord,
+    );
+    _packTextureTransform(
+      textureTransforms,
+      24,
+      emissiveTextureTransform,
+      emissiveTextureTexCoord,
+    );
+    _packTextureTransform(
+      textureTransforms,
+      32,
+      occlusionTextureTransform,
+      occlusionTextureTexCoord,
+    );
+    // The base record's padding float carries one flag the shader branches on
+    // to skip the five UV-transform evaluations, set when any record
+    // transforms its UVs or selects UV set 1. The identity transform
+    // reproduces the raw UV bit-exactly, so the flag only gates work.
+    final transformedUvs =
+        !baseColorTextureTransform.isIdentity ||
+        !metallicRoughnessTextureTransform.isIdentity ||
+        !normalTextureTransform.isIdentity ||
+        !emissiveTextureTransform.isIdentity ||
+        !occlusionTextureTransform.isIdentity ||
+        baseColorTextureTexCoord != 0 ||
+        metallicRoughnessTextureTexCoord != 0 ||
+        normalTextureTexCoord != 0 ||
+        emissiveTextureTexCoord != 0 ||
+        occlusionTextureTexCoord != 0;
+    textureTransforms[7] = transformedUvs ? 1.0 : 0.0;
+    _textureTransformsDirty = false;
+    debugTextureTransformsPackCount++;
+  }
 
   static void _packTextureTransform(
     Float32List target,
@@ -1844,6 +1883,9 @@ class PhysicallyBasedMaterial extends Material {
   @override
   bool get lodCrossFades => true;
 
+  static final Float32List _maskInfoScratch = Float32List(12);
+  static final ByteData _maskInfoBytes = ByteData.sublistView(_maskInfoScratch);
+
   @override
   void bindDepthAlphaMask(
     gpu.RenderPass pass,
@@ -1852,10 +1894,11 @@ class PhysicallyBasedMaterial extends Material {
   ) {
     // Mirrors the coverage the color pass tests in Surface():
     // texture.a * weighted vertex-color alpha * baseColorFactor alpha.
-    final params = Float32List(12)
+    final params = _maskInfoScratch
       ..[0] = alphaCutoff
       ..[1] = baseColorFactor.a
-      ..[2] = vertexColorWeight;
+      ..[2] = vertexColorWeight
+      ..[3] = 0.0;
     _packTextureTransform(
       params,
       4,
@@ -1864,7 +1907,7 @@ class PhysicallyBasedMaterial extends Material {
     );
     pass.bindUniform(
       shader.cachedUniformSlot('MaskInfo'),
-      transientsBuffer.emplace(ByteData.sublistView(params)),
+      transientsBuffer.emplaceDeduplicated(_maskInfoBytes),
     );
     pass.bindTexture(
       shader.cachedUniformSlot('mask_texture'),

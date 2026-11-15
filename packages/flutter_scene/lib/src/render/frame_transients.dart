@@ -157,6 +157,23 @@ abstract interface class TransientWriter {
   gpu.BufferView emplace(ByteData bytes);
 }
 
+/// Content-addressed uniform deduplication on [TransientWriter].
+///
+/// Defined as an extension so lightweight [TransientWriter] wrappers and test
+/// doubles only need to implement [TransientWriter.emplace].
+extension TransientWriterDeduplication on TransientWriter {
+  /// Appends [bytes], or returns the [gpu.BufferView] of an identical byte
+  /// sequence already staged in the current submission epoch when backed by
+  /// [TransientArena].
+  gpu.BufferView emplaceDeduplicated(ByteData bytes) {
+    final self = this;
+    if (self is TransientArena) {
+      return self.emplaceDeduplicated(bytes);
+    }
+    return emplace(bytes);
+  }
+}
+
 final Expando<ByteData> _scratchBytes = Expando('scratch bytes');
 
 /// A byte view of the long-lived [scratch], made once and reused, for
@@ -179,6 +196,10 @@ abstract interface class FrameTransients implements TransientWriter {
   /// upload by element type, so this skips the byte-wise copy a `ByteData`
   /// view of a `Float32List` costs under dart2wasm.
   gpu.BufferView emplaceTyped(TypedData data);
+
+  /// Appends [bytes], or reuses an already-staged view in the current
+  /// submission epoch when identical bytes were already emplaced.
+  gpu.BufferView emplaceDeduplicated(ByteData bytes);
 }
 
 /// Per-emplacement pooled transients for the immediate-execution WebGL2
@@ -237,6 +258,9 @@ class ImmediatePoolTransients implements FrameTransients {
 
   @override
   gpu.BufferView emplace(ByteData bytes) => emplaceTyped(bytes);
+
+  @override
+  gpu.BufferView emplaceDeduplicated(ByteData bytes) => emplace(bytes);
 
   @override
   gpu.BufferView emplaceTyped(TypedData data) {
@@ -346,7 +370,9 @@ class TransientArena implements FrameTransients {
     this._tracker, {
     int? alignment,
     this.blockLengthInBytes = kDefaultBlockLengthInBytes,
-  }) : _alignmentOverride = alignment {
+    @visibleForTesting bool headlessForTesting = false,
+  }) : _alignmentOverride = alignment,
+       _headlessForTesting = headlessForTesting {
     _tracker.addBeforeSubmitListener(_onBeforeSubmit);
   }
 
@@ -355,8 +381,13 @@ class TransientArena implements FrameTransients {
   /// constantly.
   static const int kDefaultBlockLengthInBytes = 256 * 1024;
 
+  static const int _dedupCapacity = 512;
+  static const int _dedupMask = _dedupCapacity - 1;
+  static const int _dedupProbeLimit = 4;
+
   final GpuSubmissionTracker _tracker;
   final int blockLengthInBytes;
+  final bool _headlessForTesting;
 
   /// Emplacement alignment. When null, the GPU context's minimum uniform
   /// alignment is used (resolved lazily; the context itself initializes on
@@ -366,7 +397,10 @@ class TransientArena implements FrameTransients {
   int get _alignment =>
       _resolvedAlignment ??
       (_resolvedAlignment =
-          _alignmentOverride ?? gpu.gpuContext.minimumUniformByteAlignment);
+          _alignmentOverride ??
+          (_headlessForTesting
+              ? 256
+              : gpu.gpuContext.minimumUniformByteAlignment));
 
   /// Blocks open for writing this frame, in fill order; the last one is the
   /// bump target. All of them seal on the next submission.
@@ -378,6 +412,40 @@ class TransientArena implements FrameTransients {
 
   int _frame = 0;
 
+  // Fixed-size open-addressed hash table mapping uniform byte content to the
+  // BufferView already staged in the current submission epoch. Cleared in O(1)
+  // by advancing [_dedupGeneration].
+  int _dedupGeneration = 1;
+  int _dedupEvictCursor = 0;
+  final Uint32List _dedupSlotGen = Uint32List(_dedupCapacity);
+  final Uint32List _dedupHash = Uint32List(_dedupCapacity);
+  final Int32List _dedupLength = Int32List(_dedupCapacity);
+  final Int32List _dedupBlockIndex = Int32List(_dedupCapacity);
+  final Int32List _dedupByteOffset = Int32List(_dedupCapacity);
+  final List<gpu.BufferView?> _dedupView = List<gpu.BufferView?>.filled(
+    _dedupCapacity,
+    null,
+  );
+
+  /// Bytes staged into open blocks since the last [reset] or [beginFrame].
+  int stagedBytes = 0;
+
+  /// Bytes skipped by [emplaceDeduplicated] hits since the last [reset] or
+  /// [beginFrame].
+  int deduplicatedBytes = 0;
+
+  /// Number of [emplaceDeduplicated] calls satisfied by reusing an existing
+  /// [gpu.BufferView] since the last [reset] or [beginFrame].
+  int deduplicatedEmplaces = 0;
+
+  void _advanceDedupGeneration() {
+    _dedupGeneration = (_dedupGeneration + 1) & 0xFFFFFFFF;
+    if (_dedupGeneration == 0) {
+      _dedupSlotGen.fillRange(0, _dedupCapacity, 0);
+      _dedupGeneration = 1;
+    }
+  }
+
   /// Total pooled blocks (open + sealed). For tests.
   @visibleForTesting
   int get blockCount => _open.length + _sealed.length;
@@ -387,19 +455,37 @@ class TransientArena implements FrameTransients {
   @visibleForTesting
   static int buffersCreated = 0;
 
+  /// Seals any open blocks, invalidates the current epoch's uniform
+  /// deduplication table in O(1), and resets per-frame staging counters.
+  void reset() {
+    for (final block in _open) {
+      _seal(block, _tracker.latestSubmission);
+    }
+    _open.clear();
+    _advanceDedupGeneration();
+    stagedBytes = 0;
+    deduplicatedBytes = 0;
+    deduplicatedEmplaces = 0;
+  }
+
   /// Begins a new frame: applies the shrink policy and resets frame stats.
   /// Open blocks from the previous frame (possible when a frame emplaced
   /// data but submitted nothing) seal with the latest submission stamp, so
   /// they stay safe against any in-flight work.
   @override
   void beginFrame() {
-    for (final block in _open) {
-      _seal(block, _tracker.latestSubmission);
-    }
-    _open.clear();
+    reset();
     _frame++;
     final completed = _tracker.completedThrough;
-    _sealed.removeWhere((block) => block.retireIfIdle(completed, _frame));
+    var retiredAny = false;
+    _sealed.removeWhere((block) {
+      final retired = block.retireIfIdle(completed, _frame);
+      if (retired) retiredAny = true;
+      return retired;
+    });
+    if (retiredAny) {
+      _dedupView.fillRange(0, _dedupCapacity, null);
+    }
   }
 
   /// Decides where an emplacement of [length] lands: at the aligned offset
@@ -439,6 +525,65 @@ class TransientArena implements FrameTransients {
   TypedData? _lastTyped;
   ByteData? _lastTypedBytes;
 
+  static int _hashBytes(ByteData bytes, int length) {
+    var h = (length * 0x9E377) & 0x7FFFFFFF;
+    final wordCount = length >> 2;
+    for (var i = 0; i < wordCount; i++) {
+      final w = bytes.getUint32(i << 2, Endian.host);
+      h = ((h * 0x9E377) + (w ^ (w >>> 16))) & 0x7FFFFFFF;
+      h ^= h >>> 11;
+    }
+    for (var b = wordCount << 2; b < length; b++) {
+      h = ((h * 0x9E377) + bytes.getUint8(b)) & 0x7FFFFFFF;
+      h ^= h >>> 7;
+    }
+    h ^= h >>> 9;
+    return h;
+  }
+
+  @override
+  gpu.BufferView emplaceDeduplicated(ByteData bytes) {
+    final length = bytes.lengthInBytes;
+    if (length > blockLengthInBytes) {
+      return _emplaceOversize(bytes);
+    }
+
+    final hash = _hashBytes(bytes, length);
+    final gen = _dedupGeneration;
+    final baseSlot = hash & _dedupMask;
+    var insertSlot = -1;
+
+    for (var p = 0; p < _dedupProbeLimit; p++) {
+      final slot = (baseSlot + p) & _dedupMask;
+      if (_dedupSlotGen[slot] != gen) {
+        insertSlot = slot;
+        break;
+      }
+      if (_dedupHash[slot] == hash && _dedupLength[slot] == length) {
+        final block = _open[_dedupBlockIndex[slot]];
+        if (block.matches(_dedupByteOffset[slot], bytes)) {
+          deduplicatedEmplaces++;
+          deduplicatedBytes += length;
+          return _dedupView[slot]!;
+        }
+      }
+    }
+
+    final view = emplace(bytes);
+    if (insertSlot < 0) {
+      insertSlot =
+          (baseSlot + (_dedupEvictCursor++ & (_dedupProbeLimit - 1))) &
+          _dedupMask;
+    }
+    _dedupSlotGen[insertSlot] = gen;
+    _dedupHash[insertSlot] = hash;
+    _dedupLength[insertSlot] = length;
+    _dedupBlockIndex[insertSlot] = _open.length - 1;
+    _dedupByteOffset[insertSlot] = view.offsetInBytes;
+    _dedupView[insertSlot] = view;
+    return view;
+  }
+
   @override
   gpu.BufferView emplace(ByteData bytes) {
     final length = bytes.lengthInBytes;
@@ -466,24 +611,19 @@ class TransientArena implements FrameTransients {
 
     block.stage(offset, bytes);
     block.cursor = offset + length;
-    return gpu.BufferView(
-      block.device,
-      offsetInBytes: offset,
-      lengthInBytes: length,
-    );
+    stagedBytes += length;
+    return block.viewAt(offset, length);
   }
 
   gpu.BufferView _emplaceOversize(ByteData bytes) {
-    final capacity = _oversizeSizeClass(bytes.lengthInBytes);
+    final length = bytes.lengthInBytes;
+    final capacity = _oversizeSizeClass(length);
     final block = _acquireBlock(capacity, oversize: true);
     _open.add(block);
     block.stage(0, bytes);
-    block.cursor = bytes.lengthInBytes;
-    return gpu.BufferView(
-      block.device,
-      offsetInBytes: 0,
-      lengthInBytes: bytes.lengthInBytes,
-    );
+    block.cursor = length;
+    stagedBytes += length;
+    return block.viewAt(0, length);
   }
 
   int _oversizeSizeClass(int length) {
@@ -510,13 +650,40 @@ class TransientArena implements FrameTransients {
       return block;
     }
     buffersCreated++;
-    final device = gpu.gpuContext.createDeviceBuffer(
-      gpu.StorageMode.hostVisible,
-      length,
-    );
+    final device = _headlessForTesting
+        ? null
+        : gpu.gpuContext.createDeviceBuffer(
+            gpu.StorageMode.hostVisible,
+            length,
+          );
     return _TransientBlock(device, ByteData(length), length, oversize)
       ..lastUsed = _frame;
   }
+
+  /// Reads back the staged bytes backing [view] from its open block, before
+  /// submission seals the block.
+  @visibleForTesting
+  Uint8List debugReadStagedBytes(gpu.BufferView view) {
+    for (final block in _open) {
+      final ownsView = view is _HeadlessBufferView
+          ? identical(view._blockToken, block)
+          : identical(view.buffer, block._device);
+      if (ownsView) {
+        return Uint8List.fromList(
+          block._stagingBytes.sublist(
+            view.offsetInBytes,
+            view.offsetInBytes + view.lengthInBytes,
+          ),
+        );
+      }
+    }
+    throw StateError('No open TransientArena block owns the given BufferView.');
+  }
+
+  /// Exposes an open block's raw staging buffer for tests that verify byte
+  /// boundaries around staged slices.
+  @visibleForTesting
+  ByteData debugOpenBlockStaging(int index) => _open[index].staging;
 
   /// Uploads and seals every open block. Runs just before each submission,
   /// so the submitted work reads fully-written buffers; [id] is the
@@ -527,11 +694,13 @@ class TransientArena implements FrameTransients {
       _seal(block, id);
     }
     _open.clear();
+    _advanceDedupGeneration();
   }
 
   void _seal(_TransientBlock block, int stamp) {
-    if (block.cursor > 0) {
-      final ok = block.device.overwrite(
+    final device = block._device;
+    if (block.cursor > 0 && device != null) {
+      final ok = device.overwrite(
         ByteData.sublistView(block.staging, 0, block.cursor),
       );
       if (!ok) {
@@ -543,7 +712,7 @@ class TransientArena implements FrameTransients {
           '${block.length}-byte transient block.',
         );
       }
-      block.device.flush(offsetInBytes: 0, lengthInBytes: block.cursor);
+      device.flush(offsetInBytes: 0, lengthInBytes: block.cursor);
     }
     block.stamp = stamp;
     block.cursor = 0;
@@ -551,19 +720,59 @@ class TransientArena implements FrameTransients {
   }
 }
 
+class _HeadlessBufferView implements gpu.BufferView {
+  const _HeadlessBufferView(
+    this._blockToken, {
+    required this.offsetInBytes,
+    required this.lengthInBytes,
+  });
+
+  final Object _blockToken;
+
+  @override
+  final int offsetInBytes;
+
+  @override
+  final int lengthInBytes;
+
+  @override
+  gpu.DeviceBuffer get buffer => throw UnsupportedError(
+    'Headless TransientArena blocks carry no GPU DeviceBuffer.',
+  );
+}
+
 class _TransientBlock {
-  _TransientBlock(this.device, this.staging, this.length, this.oversize)
+  _TransientBlock(this._device, this.staging, this.length, this.oversize)
     : _stagingBytes = staging.buffer.asUint8List(
         staging.offsetInBytes,
         staging.lengthInBytes,
-      );
+      ),
+      _stagingWords = (staging.offsetInBytes & 3) == 0
+          ? staging.buffer.asUint32List(
+              staging.offsetInBytes,
+              staging.lengthInBytes >> 2,
+            )
+          : Uint32List(0);
 
-  /// Writes up to this many bytes word by word, below the cost of the source
-  /// view a bulk copy needs. Uniform blocks land here.
-  static const int _wordCopyLimit = 256;
-
-  final gpu.DeviceBuffer device;
+  final gpu.DeviceBuffer? _device;
+  gpu.DeviceBuffer get device => _device!;
   final ByteData staging;
+
+  gpu.BufferView viewAt(int offset, int sliceLength) {
+    final device = _device;
+    if (device != null) {
+      return gpu.BufferView(
+        device,
+        offsetInBytes: offset,
+        lengthInBytes: sliceLength,
+      );
+    }
+    return _HeadlessBufferView(
+      this,
+      offsetInBytes: offset,
+      lengthInBytes: sliceLength,
+    );
+  }
 
   /// Releases the device buffer when no submitted work still reads it and it
   /// has sat unused past [kTransientIdleFrames], returning whether it did.
@@ -571,32 +780,64 @@ class _TransientBlock {
     if (stamp > completed || frame - lastUsed <= kTransientIdleFrames) {
       return false;
     }
-    gpu.gpuHost.releaseBuffer(device);
+    final device = _device;
+    if (device != null) {
+      gpu.gpuHost.releaseBuffer(device);
+    }
     return true;
   }
 
   final Uint8List _stagingBytes;
+  final Uint32List _stagingWords;
   final int length;
   final bool oversize;
 
-  /// Copies [bytes] into the staging at [offset].
+  /// Copies [bytes] into the staging buffer at [offset] in 32-bit words
+  /// whenever both source and destination are 4-byte aligned, without
+  /// allocating transient typed-data views.
   void stage(int offset, ByteData bytes) {
-    final length = bytes.lengthInBytes;
-    if (length <= _wordCopyLimit && length & 3 == 0) {
-      for (var i = 0; i < length; i += 4) {
-        staging.setUint32(
-          offset + i,
-          bytes.getUint32(i, Endian.host),
-          Endian.host,
-        );
+    final byteLength = bytes.lengthInBytes;
+    if ((offset & 3) == 0 && (bytes.offsetInBytes & 3) == 0) {
+      final dstWord = offset >> 2;
+      final wordCount = byteLength >> 2;
+      for (var i = 0; i < wordCount; i++) {
+        _stagingWords[dstWord + i] = bytes.getUint32(i << 2, Endian.host);
+      }
+      for (var b = wordCount << 2; b < byteLength; b++) {
+        _stagingBytes[offset + b] = bytes.getUint8(b);
       }
       return;
     }
-    _stagingBytes.setRange(
-      offset,
-      offset + length,
-      bytes.buffer.asUint8List(bytes.offsetInBytes, length),
-    );
+    for (var i = 0; i < byteLength; i++) {
+      _stagingBytes[offset + i] = bytes.getUint8(i);
+    }
+  }
+
+  /// Whether the staged range at [offset] equals [bytes] byte-for-byte.
+  bool matches(int offset, ByteData bytes) {
+    final byteLength = bytes.lengthInBytes;
+    if ((offset & 3) == 0) {
+      final srcWord = offset >> 2;
+      final wordCount = byteLength >> 2;
+      for (var i = 0; i < wordCount; i++) {
+        if (_stagingWords[srcWord + i] !=
+            bytes.getUint32(i << 2, Endian.host)) {
+          return false;
+        }
+      }
+      for (var b = wordCount << 2; b < byteLength; b++) {
+        if (_stagingBytes[offset + b] != bytes.getUint8(b)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    for (var i = 0; i < byteLength; i++) {
+      if (_stagingBytes[offset + i] != bytes.getUint8(i)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /// Bytes staged so far while open; reset when sealed.
