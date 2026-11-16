@@ -35,6 +35,42 @@ RenderFrameStats _render(Scene scene) {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'debugResolveWarmUpRegion preserves presented aspect ratio and defaults to 64x64 when cold',
+    () {
+      expect(
+        Scene.debugResolveWarmUpRegion(
+          lastDomPixelWidth: 0,
+          lastDomPixelHeight: 0,
+          lastSwapchainWidth: 0,
+          lastSwapchainHeight: 0,
+        ),
+        const ui.Rect.fromLTWH(0, 0, 64, 64),
+      );
+      // Direct DOM WebGPU presented size (16:9 -> 64x36) takes precedence.
+      expect(
+        Scene.debugResolveWarmUpRegion(
+          lastDomPixelWidth: 1600,
+          lastDomPixelHeight: 900,
+          lastSwapchainWidth: 100,
+          lastSwapchainHeight: 100,
+        ),
+        const ui.Rect.fromLTWH(0, 0, 64, 36),
+      );
+      // Canvas swapchain fallback (4:3 -> 64x48).
+      expect(
+        Scene.debugResolveWarmUpRegion(
+          lastDomPixelWidth: 0,
+          lastDomPixelHeight: 0,
+          lastSwapchainWidth: 1280,
+          lastSwapchainHeight: 960,
+        ),
+        const ui.Rect.fromLTWH(0, 0, 64, 48),
+      );
+    },
+  );
+
   if (!gpuAvailable()) {
     test(
       'warm-up extra nodes suite (skipped: no GPU device)',
@@ -76,4 +112,34 @@ void main() {
     expect(_render(scene).counters.submitted, 0);
     scene.dispose();
   });
+
+  test(
+    'warmUp uses an isolated scratch surface without evicting two-slot live surface pools',
+    () async {
+      final scene = Scene();
+      const sizeA = ui.Size(320, 180);
+      const sizeB = ui.Size(400, 225);
+      final ringA = {
+        scene.surface.getNextSwapchainColorTexture(sizeA),
+        scene.surface.getNextSwapchainColorTexture(sizeA),
+      };
+      final poolA = scene.surface.transientTexturePool();
+      scene.surface.getNextSwapchainColorTexture(sizeB);
+
+      await scene.warmUp(
+        _views(),
+        extraNodes: [_selectedCube()],
+        sliceBudget: const Duration(milliseconds: 2),
+      );
+
+      // Neither sizeA nor sizeB was evicted by warmUp's miniature pass.
+      final ringAAfter = {
+        scene.surface.getNextSwapchainColorTexture(sizeA),
+        scene.surface.getNextSwapchainColorTexture(sizeA),
+      };
+      expect(ringAAfter, ringA);
+      expect(identical(scene.surface.transientTexturePool(), poolA), isTrue);
+      scene.dispose();
+    },
+  );
 }
