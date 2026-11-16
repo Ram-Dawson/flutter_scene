@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   tearDown(() => debugDefaultTargetPlatformOverride = null);
 
-  test('two frames in flight by default only on Metal platforms', () {
+  test('two frames in flight by default on Metal platforms and WebGPU', () {
     for (final platform in TargetPlatform.values) {
       debugDefaultTargetPlatformOverride = platform;
       final metal =
@@ -14,6 +14,33 @@ void main() {
         defaultMaxGpuFramesInFlight,
         metal && !kIsWeb ? 2 : 1,
         reason: platform.name,
+      );
+      expect(
+        resolveDefaultMaxGpuFramesInFlight(
+          isWeb: false,
+          immediateGpuExecution: false,
+          targetPlatform: platform,
+        ),
+        metal ? 2 : 1,
+        reason: 'native ',
+      );
+      expect(
+        resolveDefaultMaxGpuFramesInFlight(
+          isWeb: true,
+          immediateGpuExecution: true,
+          targetPlatform: platform,
+        ),
+        1,
+        reason: 'WebGL2 ',
+      );
+      expect(
+        resolveDefaultMaxGpuFramesInFlight(
+          isWeb: true,
+          immediateGpuExecution: false,
+          targetPlatform: platform,
+        ),
+        2,
+        reason: 'WebGPU ',
       );
     }
   });

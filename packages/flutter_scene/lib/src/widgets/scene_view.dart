@@ -316,6 +316,22 @@ class SceneView extends StatefulWidget {
     Camera? sceneCamera,
   }) => camera ?? cameraBuilder?.call(elapsed) ?? sceneCamera ?? _defaultCamera;
 
+  /// Whether an asynchronous [Scene.repaintRequested] notification (such as a
+  /// GPU pace release or deferred shader load) should be coalesced into the
+  /// active [Ticker] instead of dirtying [CustomPaint] immediately.
+  ///
+  /// When [autoTick] and [tickerActive] are both true on a [revealed] view,
+  /// clearing the maxFrameRate deadline lets the next ticker callback advance
+  /// [onTick] before rendering—keeping direct DOM canvas presentation off
+  /// Flutter's rasterizer and preventing out-of-band paints with stale camera
+  /// state between rate-limited ticks.
+  @visibleForTesting
+  static bool shouldDeferRepaintRequestToTicker({
+    required bool autoTick,
+    required bool tickerActive,
+    required bool revealed,
+  }) => autoTick && tickerActive && revealed;
+
   @override
   State<SceneView> createState() => _SceneViewState();
 }
@@ -421,8 +437,22 @@ class _SceneViewState extends State<SceneView>
 
   void _onAssetsRefreshed() => _repaint.notify();
 
-  // A paced frame's GPU work finished; paint the frame the view held.
-  void _onRepaintRequested() => _repaint.notify();
+  // A paced frame's GPU work (or deferred resource load) finished; paint the
+  // frame the view held. While the ticker is actively driving frames, clear
+  // any rate-limit deadline so the next vsync runs _onTick (advancing
+  // onTick in lockstep and avoiding CustomPaint/Skwasm wakeups on direct DOM
+  // canvas targets).
+  void _onRepaintRequested() {
+    if (SceneView.shouldDeferRepaintRequestToTicker(
+      autoTick: widget.autoTick,
+      tickerActive: _ticker?.isActive ?? false,
+      revealed: _revealed,
+    )) {
+      _frameDue = null;
+      return;
+    }
+    _repaint.notify();
+  }
 
   // Creates the owned scene for the declarative form and applies every scene
   // prop, the single creation path for initState and constructor-form
