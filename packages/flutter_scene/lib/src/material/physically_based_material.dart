@@ -88,6 +88,18 @@ class TextureTransform {
 /// [baseColorFactor]'s alpha component.
 /// {@category Materials}
 class PhysicallyBasedMaterial extends Material {
+  /// Whether configuring a physical material extension property eagerly starts
+  /// loading the physical shader bundle before the first frame.
+  ///
+  /// Defaults to `true` so materials that use clearcoat, sheen, transmission,
+  /// anisotropy, iridescence, or extension textures have their shaders ready
+  /// by first render. Applications that fold imported physical properties onto
+  /// standard metallic-roughness PBR during scene setup can set this to `false`
+  /// while loading to avoid downloading the physical shader bundle; any
+  /// material that still requires a physical variant when prepared for
+  /// rendering requests the bundle at draw time.
+  static bool autoloadPhysicalResources = true;
+
   @override
   bool get participatesInDebugViews => true;
 
@@ -123,7 +135,7 @@ class PhysicallyBasedMaterial extends Material {
   ) async {
     final material = PhysicallyBasedMaterial();
     material._applyDescriptor(descriptor);
-    if (material._usesPhysicalVariant) {
+    if (autoloadPhysicalResources && material._usesPhysicalVariant) {
       await initializeStaticResources();
       material._ensurePreparedVariant();
     }
@@ -1091,6 +1103,7 @@ class PhysicallyBasedMaterial extends Material {
   // Starts the physical bundle loading as soon as a feature needs it, usually
   // during setup, so it is in before the first frame.
   void _requestPhysicalAssetsIfNeeded() {
+    if (!autoloadPhysicalResources) return;
     if (_usesPhysicalVariant && !physicalMaterialResourcesReady) {
       requestPhysicalMaterialResources();
     }

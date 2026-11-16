@@ -211,6 +211,41 @@ final class _WebGpuContext extends GpuContext {
     ]);
   }
 
+  final List<CompletionCallback> _pendingCompletionCallbacks = [];
+  bool _workDoneFlushScheduled = false;
+
+  /// Coalesces completion callbacks for `queue.submit` calls issued in the
+  /// current synchronous turn behind a single `queue.onSubmittedWorkDone()`
+  /// scheduled at the microtask checkpoint. Because `GPUQueue` executes
+  /// submissions in FIFO order, that single fence resolves after every command
+  /// buffer submitted in this turn has completed.
+  void enqueueSubmissionCallback(CompletionCallback callback) {
+    _pendingCompletionCallbacks.add(callback);
+    if (_workDoneFlushScheduled) return;
+    _workDoneFlushScheduled = true;
+    scheduleMicrotask(() {
+      if (_pendingCompletionCallbacks.isEmpty) {
+        _workDoneFlushScheduled = false;
+        return;
+      }
+      final batch = List<CompletionCallback>.of(_pendingCompletionCallbacks);
+      _pendingCompletionCallbacks.clear();
+      _workDoneFlushScheduled = false;
+      device.device.queue.onSubmittedWorkDone().toDart.then(
+        (_) {
+          for (final cb in batch) {
+            cb(CompletionStatus.successful);
+          }
+        },
+        onError: (Object _) {
+          for (final cb in batch) {
+            cb(CompletionStatus.error);
+          }
+        },
+      );
+    });
+  }
+
   @override
   CommandBuffer createCommandBuffer() => _WebGpuCommandBuffer(this);
 

@@ -13,6 +13,7 @@
 // uploaded (on backends that can sample hand-uploaded chains), so mipped KTX2
 // textures sample with proper minification.
 
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -50,18 +51,87 @@ const int _modeEtc2Rgba = 5;
 /// it can cross an isolate boundary (no GPU types).
 typedef _Prepared = ({List<Uint8List> levels, int mode, int width, int height});
 
+/// Serializes synchronous CPU transcodes on Flutter Web and yields a macrotask
+/// (`Future.delayed(Duration.zero)`) before starting the next transcode once
+/// cumulative transcode time in the current slice reaches [sliceBudget].
+///
+/// On Web (`kIsWeb`), `compute` runs on the main UI thread without yielding a
+/// macrotask, so a batch of textures transcoded back-to-back would starve
+/// browser rendering and progress updates.
+final class WebTranscodeTimeSlicer {
+  WebTranscodeTimeSlicer({
+    this.sliceBudget = const Duration(milliseconds: 8),
+    Stopwatch? stopwatch,
+    Future<void> Function()? yieldMacrotask,
+  }) : _stopwatch = stopwatch ?? Stopwatch(),
+       _yieldMacrotask = yieldMacrotask ?? _defaultYieldMacrotask;
+
+  /// Cumulative synchronous transcode budget before yielding a macrotask.
+  final Duration sliceBudget;
+
+  final Stopwatch _stopwatch;
+  final Future<void> Function() _yieldMacrotask;
+
+  Future<void> _tail = Future<void>.value();
+
+  static Future<void> _defaultYieldMacrotask() =>
+      Future<void>.delayed(Duration.zero);
+
+  /// Resets accumulated slice time.
+  @visibleForTesting
+  void reset() {
+    _stopwatch
+      ..stop()
+      ..reset();
+  }
+
+  /// Runs [work] exclusively in FIFO order, yielding a macrotask and resetting
+  /// the slice stopwatch beforehand when prior transcodes in the current slice
+  /// have accumulated at least [sliceBudget].
+  Future<T> run<T>(T Function() work) {
+    final previous = _tail;
+    final gate = Completer<void>();
+    _tail = gate.future;
+    return _runQueued(previous, gate, work);
+  }
+
+  Future<T> _runQueued<T>(
+    Future<void> previous,
+    Completer<void> gate,
+    T Function() work,
+  ) async {
+    await previous;
+    try {
+      if (_stopwatch.elapsed >= sliceBudget) {
+        _stopwatch.reset();
+        await _yieldMacrotask();
+      }
+      _stopwatch.start();
+      try {
+        return work();
+      } finally {
+        _stopwatch.stop();
+      }
+    } finally {
+      gate.complete();
+    }
+  }
+}
+
+/// Shared main-thread transcode time-slicer used on `kIsWeb`.
+final WebTranscodeTimeSlicer webTranscodeTimeSlicer = WebTranscodeTimeSlicer();
+
 /// Reads a flutter_scene KTX2 file from [bytes], transcodes it on a background
-/// isolate, and uploads the result. Use this from async load paths so large
-/// textures do not block the UI.
+/// isolate (or time-sliced on the main thread on Web), and uploads the result.
+/// Use this from async load paths so large textures do not block the UI.
 Future<gpu.Texture> gpuTextureFromKtx2Async(Uint8List bytes) async {
   _logFamiliesOnce();
   final mode = _selectMode();
   final mips = uploadableMipChains;
-  final prepared = await compute(_prepareFromBytes, (
-    ktx2: bytes,
-    mode: mode,
-    mips: mips,
-  ));
+  final input = (ktx2: bytes, mode: mode, mips: mips);
+  final prepared = kIsWeb
+      ? await webTranscodeTimeSlicer.run(() => _prepareFromBytes(input))
+      : await compute(_prepareFromBytes, input);
   return _upload(prepared);
 }
 
