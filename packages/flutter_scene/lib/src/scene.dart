@@ -2201,14 +2201,20 @@ base class Scene implements SceneGraph {
     // it first so the compiles find it idle.
     await awaitRasterThread();
     if (_disposed) return;
-    // Encode one real frame into a discarded recording. The GPU passes (and so
-    // the pipeline compilations and resource uploads) are submitted during
-    // rendering; only the final canvas blit is thrown away. A small area is
-    // enough because pipeline identity is resolution-independent.
+    // Encode one real frame into an ephemeral scratch surface whose final
+    // color output is discarded without `Texture.asImage` readback or touching
+    // `surface`'s live view rings/pools (preserving WebGPU direct DOM canvas
+    // state and two-slot full-resolution transient pools).
+    final warmUpRegion = debugResolveWarmUpRegion(
+      lastDomPixelWidth: _lastDomPixelWidth,
+      lastDomPixelHeight: _lastDomPixelHeight,
+      lastSwapchainWidth: surface.lastSwapchainColorTexture(0)?.width ?? 0,
+      lastSwapchainHeight: surface.lastSwapchainColorTexture(0)?.height ?? 0,
+    );
+    final warmUpSurface = Surface();
     void encode() {
-      final recorder = ui.PictureRecorder();
-      final canvas = ui.Canvas(recorder);
       _warmUpIncludeOffscreen = includeOffscreen;
+      _inWarmUp = true;
       // The tier frames follow the first while its GPU work still runs, and a
       // paced frame encodes nothing, so pacing is off while they encode.
       final framesInFlight = maxGpuFramesInFlight;
@@ -2231,10 +2237,13 @@ base class Scene implements SceneGraph {
           // before the first real frame (render then skips its wall-clock
           // tick).
           update(0.0);
-          renderViews(
+          _renderViewsInternal(
             views,
-            canvas,
-            region: const ui.Rect.fromLTWH(0, 0, 64, 64),
+            null,
+            region: warmUpRegion,
+            pixelRatio: 1.0,
+            discardOutput: true,
+            surfaceOverride: warmUpSurface,
           );
         }
       } finally {
@@ -2245,30 +2254,58 @@ base class Scene implements SceneGraph {
         shadingTierOverride = null;
         maxGpuFramesInFlight = framesInFlight;
         _warmUpIncludeOffscreen = false;
-        recorder.endRecording().dispose();
+        _inWarmUp = false;
       }
     }
 
-    if (sliceBudget == null) {
-      encode();
-      return;
-    }
-    // Each slice is a whole offscreen frame; stop once one encodes every view
-    // and skips nothing, or after a generous cap if something never finishes
-    // building. A view paced by GPU backpressure re-presents its last image
-    // and resolves no pipelines, so it proves nothing.
-    for (var slice = 0; slice < 1000; slice++) {
-      // Each slice compiles pipelines after a yield, so rendezvous again.
-      if (slice > 0) await awaitRasterThread();
-      if (_disposed) return;
-      final paced = _pacedFrameCount;
-      withPipelineBuildBudget(sliceBudget, encode);
-      if (_pacedFrameCount == paced && deferredPipelineBuilds == 0) return;
-      await Future<void>.delayed(const Duration(milliseconds: 16));
+    try {
+      if (sliceBudget == null) {
+        encode();
+        return;
+      }
+      // Each slice is a whole offscreen frame; stop once one encodes every view
+      // and skips nothing, or after a generous cap if something never finishes
+      // building. A view paced by GPU backpressure re-presents its last image
+      // and resolves no pipelines, so it proves nothing.
+      for (var slice = 0; slice < 1000; slice++) {
+        // Each slice compiles pipelines after a yield, so rendezvous again.
+        if (slice > 0) await awaitRasterThread();
+        if (_disposed) return;
+        final paced = _pacedFrameCount;
+        withPipelineBuildBudget(sliceBudget, encode);
+        if (_pacedFrameCount == paced && deferredPipelineBuilds == 0) return;
+        await Future<void>.delayed(const Duration(milliseconds: 16));
+      }
+    } finally {
+      warmUpSurface.dispose();
     }
   }
 
   bool _warmUpIncludeOffscreen = false;
+  bool _inWarmUp = false;
+
+  /// Resolves the miniature logical region used by [warmUp], matching the
+  /// aspect ratio of an already-presented view so directional shadow cascade
+  /// plans do not rebake static tiles on live scenes.
+  @visibleForTesting
+  static ui.Rect debugResolveWarmUpRegion({
+    required int lastDomPixelWidth,
+    required int lastDomPixelHeight,
+    required int lastSwapchainWidth,
+    required int lastSwapchainHeight,
+  }) {
+    var w = lastDomPixelWidth;
+    var h = lastDomPixelHeight;
+    if (w <= 0 || h <= 0) {
+      w = lastSwapchainWidth;
+      h = lastSwapchainHeight;
+    }
+    if (w > 0 && h > 0) {
+      final scaledH = (64.0 * h / w).round().clamp(16, 128).toDouble();
+      return ui.Rect.fromLTWH(0, 0, 64, scaledH);
+    }
+    return const ui.Rect.fromLTWH(0, 0, 64, 64);
+  }
 
   // Just past the camera's near plane on its view axis, so every pass that
   // culls to the view draws warm-up's extra nodes.
@@ -2317,6 +2354,8 @@ base class Scene implements SceneGraph {
     double? pixelRatio,
     bool allowDirectDomCanvas = false,
     ui.Offset domGlobalOffset = ui.Offset.zero,
+    bool discardOutput = false,
+    Surface? surfaceOverride,
   }) {
     renderScene.recordRenderedViews(views);
     if (!isReadyToRender) {
@@ -2343,10 +2382,11 @@ base class Scene implements SceneGraph {
     final singleScreenView = views.length == 1 && views.first.target == null;
     final wantDirectDom =
         allowDirectDomCanvas &&
+        !discardOutput &&
         singleScreenView &&
         _pendingGraphCapture == null &&
         gpu.gpuHost.canPresentToDomCanvas;
-    if (!wantDirectDom) {
+    if (!wantDirectDom && !discardOutput) {
       _hasDomPresentedFrame = false;
       _lastDomLogicalArea = null;
       if (canvas == null) {
@@ -2475,7 +2515,7 @@ base class Scene implements SceneGraph {
       if (wantDirectDom &&
           _canHoldDirectDomFrame(views.first, drawArea, domGlobalOffset, dpr)) {
         presentedDom = true;
-      } else if (canvas != null) {
+      } else if (!discardOutput && canvas != null) {
         _presentHeldFrame(views, canvas, drawArea);
       }
       renderStats.endFrame(pipelineCacheSize: pipelineCacheSize);
@@ -2488,8 +2528,8 @@ base class Scene implements SceneGraph {
         if (view.target == null) _pacedFrameCount++;
       }
       _holdPace();
-      if (!wantDirectDom) {
-        _presentHeldFrame(views, canvas!, drawArea);
+      if (!wantDirectDom && !discardOutput && canvas != null) {
+        _presentHeldFrame(views, canvas, drawArea);
       }
       renderStats.endFrame(pipelineCacheSize: pipelineCacheSize);
       rendererSubmissions.endFrame();
@@ -2714,6 +2754,8 @@ base class Scene implements SceneGraph {
         capturePlanarReflections: identical(view, planarCaptureView),
         wantDirectDom: wantDirectDom,
         domGlobalOffset: domGlobalOffset,
+        discardOutput: discardOutput,
+        surfaceOverride: surfaceOverride,
       )) {
         presentedDom = true;
       }
@@ -3091,7 +3133,10 @@ base class Scene implements SceneGraph {
     bool capturePlanarReflections = false,
     bool wantDirectDom = false,
     ui.Offset domGlobalOffset = ui.Offset.zero,
+    bool discardOutput = false,
+    Surface? surfaceOverride,
   }) {
+    final activeSurface = surfaceOverride ?? surface;
     // Allocate the offscreen render target at physical-pixel resolution so
     // the rasterized 3D content matches Flutter's framebuffer density.
     // Without this, the texture is sized in logical pixels and the
@@ -3116,13 +3161,18 @@ base class Scene implements SceneGraph {
     // Pace the GPU: with enough frames still running, present the previous
     // image rather than queue work the calling thread would block on. A
     // pending capture must observe a rendered frame, so it is never paced.
-    final previous = surface.lastSwapchainColorTexture(viewIndex);
+    final previous = activeSurface.lastSwapchainColorTexture(viewIndex);
     if (!captureThisView &&
         maxGpuFramesInFlight > 0 &&
         previous != null &&
         previous.width == pixelSize.width.toInt() &&
         previous.height == pixelSize.height.toInt() &&
         rendererSubmissions.priorFramesInFlight >= maxGpuFramesInFlight) {
+      if (discardOutput) {
+        _pacedFrameCount++;
+        _holdPace();
+        return false;
+      }
       if (wantDirectDom &&
           _hasDomPresentedFrame &&
           _lastDomLogicalArea == drawArea.shift(domGlobalOffset) &&
@@ -3159,16 +3209,14 @@ base class Scene implements SceneGraph {
       _pendingGraphCapture = null;
       capturer = RenderGraphCapturer(request: pendingCapture.request);
     }
-    final gpu.Texture swapchainColor = surface.getNextSwapchainColorTexture(
-      pixelSize,
-      viewIndex,
-    );
+    final gpu.Texture swapchainColor = activeSurface
+        .getNextSwapchainColorTexture(pixelSize, viewIndex);
     _renderViewToTexture(
       view: view,
       outputColor: swapchainColor,
       pixelSize: pixelSize,
       viewportSize: drawArea.size,
-      pool: surface.transientTexturePool(viewIndex),
+      pool: activeSurface.transientTexturePool(viewIndex),
       environmentMap: environmentMap,
       transientsBuffer: transientsBuffer,
       lightComponent: lightComponent,
@@ -3186,6 +3234,10 @@ base class Scene implements SceneGraph {
           pixelHeight: pixelSize.height.toInt(),
         ),
       );
+    }
+
+    if (discardOutput) {
+      return false;
     }
 
     if (wantDirectDom) {
@@ -3849,12 +3901,18 @@ base class Scene implements SceneGraph {
     Vector2 currentJitterUv = Vector2.zero();
     Vector2 prevJitterNdc = Vector2.zero();
     TaaHistoryState? taaState;
+    TaaHistoryState? ephemeralWarmUpTaaState;
     if (enableTaa) {
-      taaState = _taaState ??= TaaHistoryState();
+      final preserveLiveTaa = _inWarmUp && _taaState != null;
+      taaState = preserveLiveTaa
+          ? (ephemeralWarmUpTaaState = TaaHistoryState())
+          : (_taaState ??= TaaHistoryState());
       final haltonPt = halton23(
         (_taaFrameIndex % temporalAntiAliasing.jitterSequenceLength) + 1,
       );
-      _taaFrameIndex++;
+      if (!preserveLiveTaa) {
+        _taaFrameIndex++;
+      }
       currentJitterNdc = Vector2(
         (2 * haltonPt.x - 1) /
             pixelSize.width *
@@ -4125,20 +4183,28 @@ base class Scene implements SceneGraph {
     if (wantSceneColorHistory) {
       graph.addPass(
         SceneColorHistoryPass(
-          current: _ssgiHistoryColor,
-          store: (texture) => _ssgiHistoryColor = texture,
+          current: _inWarmUp ? null : _ssgiHistoryColor,
+          store: (texture) {
+            if (!_inWarmUp) _ssgiHistoryColor = texture;
+          },
         ),
       );
-      _ssgiHistoryViewProjection = camera.getViewTransform(pixelSize);
+      if (!_inWarmUp) {
+        _ssgiHistoryViewProjection = camera.getViewTransform(pixelSize);
+      }
     }
     if (captureLinearColor) {
       graph.addPass(SceneColorBlitPass(output: outputColor));
-      graph.execute(
-        transientsBuffer: transientsBuffer,
-        texturePool: pool,
-        observer: capturer,
-        stats: viewStats,
-      );
+      try {
+        graph.execute(
+          transientsBuffer: transientsBuffer,
+          texturePool: pool,
+          observer: capturer,
+          stats: viewStats,
+        );
+      } finally {
+        ephemeralWarmUpTaaState?.dispose();
+      }
       _finishViewStats(viewStats, viewWatch);
       return;
     }
@@ -4494,12 +4560,16 @@ base class Scene implements SceneGraph {
       graph.addPass(displaySteps[i](output));
     }
 
-    graph.execute(
-      transientsBuffer: transientsBuffer,
-      texturePool: pool,
-      observer: capturer,
-      stats: viewStats,
-    );
+    try {
+      graph.execute(
+        transientsBuffer: transientsBuffer,
+        texturePool: pool,
+        observer: capturer,
+        stats: viewStats,
+      );
+    } finally {
+      ephemeralWarmUpTaaState?.dispose();
+    }
     _finishViewStats(viewStats, viewWatch);
   }
 
