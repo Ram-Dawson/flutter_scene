@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:typed_data';
@@ -7,6 +8,8 @@ import 'package:flutter/services.dart' show AssetBundle, rootBundle;
 import 'package:web/web.dart' as web;
 
 import 'generated_asset_fetch_retry.dart';
+
+const Duration _kGeneratedAssetAttemptTimeout = Duration(seconds: 15);
 
 /// Loads the generated asset at [key], revalidating against the server.
 ///
@@ -27,14 +30,32 @@ Future<ByteData> loadGeneratedAsset(String key, {AssetBundle? bundle}) async {
   return fetchGeneratedAssetWithRetry(
     key: key,
     attempt: () async {
-      final response = await web.window
-          .fetch(url.toJS, web.RequestInit(cache: 'no-cache'))
-          .toDart;
-      if (!response.ok) {
-        throw GeneratedAssetHttpStatusException(response.status);
+      final controller = web.AbortController();
+      final timer = Timer(_kGeneratedAssetAttemptTimeout, () {
+        controller.abort('Timeout loading generated asset $key'.toJS);
+      });
+      try {
+        final response = await web.window
+            .fetch(
+              url.toJS,
+              web.RequestInit(
+                cache: 'no-cache',
+                signal: controller.signal,
+              ),
+            )
+            .toDart
+            .timeout(_kGeneratedAssetAttemptTimeout);
+        if (!response.ok) {
+          throw GeneratedAssetHttpStatusException(response.status);
+        }
+        final buffer = await response
+            .arrayBuffer()
+            .toDart
+            .timeout(_kGeneratedAssetAttemptTimeout);
+        return ByteData.view(buffer.toDart);
+      } finally {
+        timer.cancel();
       }
-      final buffer = await response.arrayBuffer().toDart;
-      return ByteData.view(buffer.toDart);
     },
   );
 }
