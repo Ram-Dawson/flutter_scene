@@ -28,6 +28,44 @@ Widget _sized(Widget child) => Directionality(
 );
 
 void main() {
+  test(
+    'shouldDeferRepaintRequestToTicker coalesces only when actively ticking and revealed',
+    () {
+      expect(
+        SceneView.shouldDeferRepaintRequestToTicker(
+          autoTick: true,
+          tickerActive: true,
+          revealed: true,
+        ),
+        isTrue,
+      );
+      expect(
+        SceneView.shouldDeferRepaintRequestToTicker(
+          autoTick: false,
+          tickerActive: true,
+          revealed: true,
+        ),
+        isFalse,
+      );
+      expect(
+        SceneView.shouldDeferRepaintRequestToTicker(
+          autoTick: true,
+          tickerActive: false,
+          revealed: true,
+        ),
+        isFalse,
+      );
+      expect(
+        SceneView.shouldDeferRepaintRequestToTicker(
+          autoTick: true,
+          tickerActive: true,
+          revealed: false,
+        ),
+        isFalse,
+      );
+    },
+  );
+
   testWidgets('allows at most one of camera, cameraBuilder, or viewsBuilder', (
     tester,
   ) async {

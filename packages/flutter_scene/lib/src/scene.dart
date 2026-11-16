@@ -20,6 +20,9 @@ import 'package:flutter_scene/src/render/viewport_camera.dart';
 import 'package:flutter_scene/src/render/projection_params.dart';
 import 'package:flutter_scene/src/render/debug_view.dart';
 import 'package:flutter_scene/src/render/frame_transients.dart';
+import 'package:flutter_scene/src/render/transients_execution_native.dart'
+    if (dart.library.js_interop) 'package:flutter_scene/src/render/transients_execution_web.dart'
+    show kImmediateGpuExecution;
 import 'package:flutter_scene/src/render/instance_packing.dart'
     show beginRetainedInstanceFrame;
 import 'package:flutter_scene/src/render/mip_sampling_probe.dart';
@@ -188,18 +191,39 @@ enum AntiAliasingMode {
   auto,
 }
 
-/// The default [Scene.maxGpuFramesInFlight] for this platform, 2 on iOS and
-/// macOS (where Impeller always runs on Metal) and 1 elsewhere.
-// TODO(gpu-pacing): Re-measure Android Vulkan once Flutter GPU submits off the
-// calling thread (flutter/flutter#194882), and measure Windows.
+/// Resolves the default [Scene.maxGpuFramesInFlight] for the given runtime
+/// properties.
+///
+/// Returns 2 on iOS and macOS (where Impeller runs on Metal without stalling
+/// either thread) and on WebGPU (isWeb && !immediateGpuExecution), where
+/// GPUQueue.submit is non-blocking and GPUQueue.onSubmittedWorkDone
+/// resolves asynchronously across the browser's GPU process IPC boundary (so a
+/// limit of 1 serializes CPU encoding behind the IPC round-trip and drops
+/// every other frame even when GPU frame time is well within budget). Returns
+/// 1 elsewhere (WebGL2, Android Vulkan, Windows, Linux).
 @visibleForTesting
-int get defaultMaxGpuFramesInFlight {
-  if (kIsWeb) return 1;
-  return switch (defaultTargetPlatform) {
+int resolveDefaultMaxGpuFramesInFlight({
+  required bool isWeb,
+  required bool immediateGpuExecution,
+  required TargetPlatform targetPlatform,
+}) {
+  if (isWeb) return immediateGpuExecution ? 1 : 2;
+  return switch (targetPlatform) {
     TargetPlatform.iOS || TargetPlatform.macOS => 2,
     _ => 1,
   };
 }
+
+/// The default [Scene.maxGpuFramesInFlight] for this platform: 2 on iOS,
+/// macOS, and WebGPU, and 1 elsewhere.
+// TODO(gpu-pacing): Re-measure Android Vulkan once Flutter GPU submits off the
+// calling thread (flutter/flutter#194882), and measure Windows.
+@visibleForTesting
+int get defaultMaxGpuFramesInFlight => resolveDefaultMaxGpuFramesInFlight(
+  isWeb: kIsWeb,
+  immediateGpuExecution: kImmediateGpuExecution,
+  targetPlatform: defaultTargetPlatform,
+);
 
 /// Represents a 3D scene, which is a collection of nodes that can be rendered onto the screen.
 ///
