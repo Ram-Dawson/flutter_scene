@@ -54,6 +54,11 @@ class SpotShadowFrame {
   /// The slot assigned to [component] (its atlas tile and matrix), or -1 when
   /// it is not a shadow caster this frame.
   int slotOf(SpotLightComponent component) => casters.indexOf(component);
+
+  /// Caster-face mode for [slot], falling back to [casterFaces].
+  ShadowCasterFaces casterFacesFor(int slot) => slot < casters.length
+      ? casters[slot].light.shadowCasterFaces
+      : casterFaces;
 }
 
 /// Selects up to [kMaxSpotShadows] active shadow-casting spots from [spots] and

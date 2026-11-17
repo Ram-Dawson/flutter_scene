@@ -833,6 +833,7 @@ class SpotLight {
     this.innerConeAngle = 0.0,
     this.outerConeAngle = math.pi / 4.0,
     this.castsShadow = false,
+    this.cacheStaticShadows = true,
     this.shadowMapResolution = 1024,
     this.shadowNear = 0.1,
     this.shadowDepthBias = 0.0,
@@ -877,6 +878,15 @@ class SpotLight {
   /// cone into a perspective shadow map if the scene's spot-shadow budget has
   /// room (shadow-casting spots are limited; the rest shade unshadowed).
   bool castsShadow;
+
+  /// Whether this spot caches its shadow tile across frames.
+  ///
+  /// Static casters (`shadowStatic`) render into a persistent tile reused while
+  /// the spot's transform and shadow parameters hold steady, and the full tile
+  /// is reused across frames while dynamic casters are stationary. Disable this
+  /// for a spot that moves or re-aims every frame, where rebuilding and copying
+  /// cached tiles adds work over rendering directly into the frame atlas.
+  bool cacheStaticShadows;
 
   /// Pixel resolution this spot asks for on its (square) shadow map tile.
   ///
