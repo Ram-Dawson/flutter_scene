@@ -4,12 +4,14 @@
 
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, kIsWeb;
 
 import 'mipmap.dart';
+import 'web_transcode_time_slicer.dart';
 
-/// Builds the mip chain for [pixels] on a background isolate, so a large
-/// texture does not block the caller while it downsamples.
+/// Builds the mip chain for [pixels] on a background isolate (or time-sliced on
+/// the main thread on Web), so large textures neither block callers nor starve
+/// browser event loop turns during bulk texture loads.
 ///
 /// The synchronous [generateMipChain] stays for the sync realize path, which
 /// cannot await.
@@ -18,12 +20,18 @@ Future<List<MipLevel>> generateMipChainAsync(
   int width,
   int height,
   TextureContent content,
-) => compute(_generateMipChain, (
-  pixels: pixels,
-  width: width,
-  height: height,
-  content: content,
-));
+) {
+  final input = (
+    pixels: pixels,
+    width: width,
+    height: height,
+    content: content,
+  );
+  if (kIsWeb) {
+    return webTranscodeTimeSlicer.run(() => _generateMipChain(input));
+  }
+  return compute(_generateMipChain, input);
+}
 
 /// Isolate entry point. Pure Dart, no GPU.
 List<MipLevel> _generateMipChain(
