@@ -8,6 +8,8 @@ import 'package:flutter/foundation.dart';
 // ignore: implementation_imports
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
 // ignore: implementation_imports
+import 'package:flutter_scene/src/material/physical_material.dart';
+// ignore: implementation_imports
 import 'package:flutter_scene/src/material/physical_material_variant.dart';
 // ignore: implementation_imports
 import 'package:flutter_scene/src/render/render_scene.dart';
@@ -41,6 +43,7 @@ void main() {
   late FlutterExceptionHandler? previousOnError;
 
   setUp(() {
+    PhysicallyBasedMaterial.autoloadPhysicalResources = true;
     resetPhysicalMaterialResourcesForTesting();
     reported = [];
     previousOnError = FlutterError.onError;
@@ -48,6 +51,7 @@ void main() {
   });
 
   tearDown(() {
+    PhysicallyBasedMaterial.autoloadPhysicalResources = true;
     FlutterError.onError = previousOnError;
     resetPhysicalMaterialResourcesForTesting();
   });
@@ -122,5 +126,50 @@ void main() {
     await physicalMaterialResourcesLoad;
     await expectLater(initializePhysicalMaterialResources(), throwsA(anything));
     expect(physicalMaterialResourcesPending, isFalse);
+  }, skip: kIsWeb ? _webFetch : null);
+
+  test('autoloadPhysicalResources = false suppresses eager bundle loads during '
+      'mutation and descriptor import', () async {
+    PhysicallyBasedMaterial.autoloadPhysicalResources = false;
+
+    final material = PhysicallyBasedMaterial()
+      ..clearcoat = 0.8
+      ..sheenColor = Vector4(0.3, 0.3, 0.3, 1.0)
+      ..transmission = 0.4;
+    expect(physicalMaterialResourcesPending, isFalse);
+    expect(physicalMaterialResourcesLoad, isNull);
+
+    // Folding physical extensions back onto standard PBR leaves nothing
+    // deferred and never started a bundle download.
+    material
+      ..clearcoat = 0.0
+      ..sheenColor = Vector4.zero()
+      ..transmission = 0.0;
+    expect(physicalMaterialResourcesPending, isFalse);
+    // ignore: invalid_use_of_internal_member
+    expect(material.awaitsDeferredResources, isFalse);
+
+    // Descriptor-based import also respects autoloadPhysicalResources = false.
+    // ignore: invalid_use_of_internal_member
+    final imported = await PhysicallyBasedMaterial.fromDescriptor(
+      // ignore: invalid_use_of_internal_member
+      PhysicalMaterialDescriptor(clearcoat: 0.9, transmission: 0.2),
+    );
+    expect(physicalMaterialResourcesPending, isFalse);
+    // ignore: invalid_use_of_internal_member
+    expect(imported.awaitsDeferredResources, isTrue);
+  });
+
+  test('autoloadPhysicalResources = false still requests the bundle if an '
+      'unfolded physical material reaches draw preparation', () async {
+    PhysicallyBasedMaterial.autoloadPhysicalResources = false;
+    final material = PhysicallyBasedMaterial()..clearcoat = 0.7;
+    expect(physicalMaterialResourcesPending, isFalse);
+
+    // Accessing fragmentShader runs _ensurePreparedVariant() before resolving
+    // the fallback base shader (which throws in unit tests without GPU init).
+    expect(() => material.fragmentShader, throwsException);
+    expect(physicalMaterialResourcesPending, isTrue);
+    await physicalMaterialResourcesLoad;
   }, skip: kIsWeb ? _webFetch : null);
 }
