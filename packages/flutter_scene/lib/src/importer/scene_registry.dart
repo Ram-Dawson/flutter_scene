@@ -5,6 +5,7 @@ import 'package:scene/scene.dart';
 
 import '../fscene/fsceneb_async.dart';
 import '../fscene/realize/component_codec.dart';
+import '../generated_assets/generated_asset_fetch.dart';
 import '../generated_assets/generated_asset_lookup.dart';
 import '../generated_assets/generated_assets.dart';
 import '../fscene/realize/realize.dart';
@@ -542,7 +543,7 @@ final class SceneRegistry {
   Future<SceneDocument> _readDocument(String key, AssetBundle bundle) async {
     // Evict so a hot reload re-reads the changed asset.
     bundle.evict(key);
-    final data = await bundle.load(key);
+    final data = await loadGeneratedAsset(key, bundle: bundle);
     // Inflating a texture-heavy container takes hundreds of milliseconds, so
     // keep it off the frames on screen.
     return readFscenebAsync(

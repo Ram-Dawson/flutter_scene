@@ -6,6 +6,7 @@ library;
 import 'package:flutter/foundation.dart' show internal;
 import 'package:flutter/services.dart';
 
+import '../generated_assets/generated_asset_fetch.dart';
 import '../generated_assets/generated_asset_lookup.dart';
 import '../generated_assets/generated_assets.dart';
 import '../gpu/gpu.dart' as gpu;
@@ -250,7 +251,7 @@ Future<TextureSource> loadTexture(
 }) async {
   final assetBundle = bundle ?? rootBundle;
   Future<Uint8List> loadBytes(String key) async {
-    final data = await assetBundle.load(key);
+    final data = await loadGeneratedAsset(key, bundle: assetBundle);
     return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
   }
 
